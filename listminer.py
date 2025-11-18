@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 listminer.py — Password Artifact Generator (2025 Edition)
-One command → 8 hashcat-ready
+One command → 8 hashcat-ready artifacts
 Correct prepend (^) and append ($) rule generation
 Tested on Python 3.11–3.13 + hashcat 6.2.6+
 """
