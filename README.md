@@ -1,4 +1,4 @@
-# ListMiner – 2025 Red-Team Password Artifact Generator
+# ListMiner – Password Artifact Generator
 
 `listminer.py` turns **raw password dumps / potfiles** into a full toolkit of **Hashcat-ready artifacts** in a single run:
 
