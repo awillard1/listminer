@@ -10,6 +10,7 @@ import logging
 import re
 import signal
 import subprocess
+import shlex
 import sys
 import tempfile
 from collections import Counter
