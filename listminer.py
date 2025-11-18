@@ -271,7 +271,7 @@ def main():
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("-f", "--file", type=Path, help="Single password file")
     group.add_argument("-d", "--dir", type=Path, help="Directory with password files")
-    parser.add_argument("-o", "--output", type=Path, default=Path("wordmine_output"), help="Output directory")
+    parser.add_argument("-o", "--output", type=Path, default=Path("listminer_output"), help="Output directory")
     args = parser.parse_args()
 
     files = [args.file.resolve()] if args.file else find_password_files(args.dir)
