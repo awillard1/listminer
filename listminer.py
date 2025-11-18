@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-listminer.py — Red-Team Password Artifact Generator
-One command → 8 hashcat-ready outputs
-Tested & working on Python 3.13 + hashcat 6.2.6+
+listminer.py — Password Artifact Generator (2025 Edition)
+One command → 8 hashcat-ready
+Correct prepend (^) and append ($) rule generation
+Tested on Python 3.11–3.13 + hashcat 6.2.6+
 """
-
 import argparse
 import logging
 import re
@@ -27,11 +27,12 @@ try:
     TQDM = True
 except Exception:
     TQDM = False
+
 def progress(it, **kw):
     return _tqdm(it, **kw) if TQDM and sys.stdout.isatty() else it
 
 # =============================================
-# Logging — FIXED FOR Python 3.13 (%% instead of %)
+# Logging
 # =============================================
 logging.basicConfig(
     level=logging.INFO,
@@ -63,7 +64,7 @@ def decode_plaintext(text: str) -> str:
 
 def extract_password(line: str) -> str:
     line = line.strip()
-    if not line:
+    if not line or line.startswith("#"):
         return ""
     return decode_plaintext(line.rsplit(":", 1)[-1]) if ":" in line else decode_plaintext(line)
 
@@ -72,12 +73,15 @@ def extract_password(line: str) -> str:
 # =============================================
 def find_password_files(directory: Path) -> List[Path]:
     exts = {".txt", ".pot", ".potfile", ".lst", ".list", ""}
-    files = [p.resolve() for p in directory.rglob("*") if p.suffix.lower() in exts and p.is_file() and p.stat().st_size > 0]
+    files = [
+        p.resolve() for p in directory.rglob("*")
+        if p.suffix.lower() in exts and p.is_file() and p.stat().st_size > 0
+    ]
     log.info(f"Found {len(files)} password file(s)")
     return sorted(files)
 
 # =============================================
-# MAIN CLASS
+# MAIN CLASS — ELITE EDITION
 # =============================================
 class RedTeamArtifactGenerator:
     def __init__(self, output_dir: Path):
@@ -97,7 +101,7 @@ class RedTeamArtifactGenerator:
         total = 0
         for file in files:
             size_mb = file.stat().st_size // 1048576
-            log.info(f"  → {file.name} ({size_mb} MB)")
+            log.info(f" → {file.name} ({size_mb} MB)")
             with file.open("r", encoding="utf-8", errors="ignore") as f:
                 for line in progress(f, desc=file.stem[:30], leave=False):
                     pwd = extract_password(line)
@@ -105,45 +109,74 @@ class RedTeamArtifactGenerator:
                         self.passwords.append(pwd)
                         total += 1
                         n = min(6, len(pwd))
-                        for i in range(1, n+1):
+                        for i in range(1, n + 1):
                             self.prefix[pwd[:i]] += 1
                             self.suffix[pwd[-i:]] += 1
         log.info(f"Successfully parsed {total:,} passwords")
 
-        # Elite affix rules
-        for affix, cnt in self.prefix.most_common(1200):
-            bonus = min(len(affix), 6) ** 2.8
-            rule = " ".join(f"^{c}" for c in affix)
-            self.add_rule(rule, int(cnt * bonus * 15))
-        for affix, cnt in self.suffix.most_common(1200):
-            bonus = min(len(affix), 6) ** 2.8
-            rule = " ".join(f"${c}" for c in affix)
-            self.add_rule(rule, int(cnt * bonus * 15))
+        # ==================================================================
+        # ELITE RULE GENERATION — PREPEND & APPEND 100% CORRECT
+        # ==================================================================
+        log.info("Generating elite rules — prepends reversed, appends forward...")
 
-        # Surround rules
+        # 1. PURE PREPEND RULES (highest priority — perfect for -a 6)
+        for prefix, count in self.prefix.most_common(2000):
+            if len(prefix) < 2:
+                continue
+            bonus = min(len(prefix), 6) ** 3.6
+            rule = " ".join(f"^{c}" for c in reversed(prefix))
+            self.scored_rules.append((int(count * bonus * 40), rule))
+
+        # 2. PURE APPEND RULES (very high priority)
+        for suffix, count in self.suffix.most_common(1600):
+            if len(suffix) < 2:
+                continue
+            bonus = min(len(suffix), 6) ** 3.3
+            rule = " ".join(f"${c}" for c in suffix)
+            self.scored_rules.append((int(count * bonus * 30), rule))
+
+        # 3. Classic prepend & append
+        for prefix, count in self.prefix.most_common(1200):
+            if len(prefix) >= 2:
+                rule = " ".join(f"^{c}" for c in reversed(prefix))
+                self.add_rule(rule, int(count * 180))
+
+        for suffix, count in self.suffix.most_common(1200):
+            if len(suffix) >= 2:
+                rule = " ".join(f"${c}" for c in suffix)
+                self.add_rule(rule, int(count * 180))
+
+        # 4. Surround rules (best prefix + best suffix)
         seen = set()
-        for (p, pc) in self.prefix.most_common(300):
-            for (s, sc) in self.suffix.most_common(300):
-                if p != s and len(p) <= 4 and len(s) <= 4:
-                    rule = " ".join(f"^{c}" for c in p) + " " + " ".join(f"${c}" for c in s)
-                    if rule not in seen:
-                        seen.add(rule)
-                        self.add_rule(rule, int((pc + sc) * 10))
+        for prefix, pc in self.prefix.most_common(500):
+            if not (2 <= len(prefix) <= 5):
+                continue
+            pre_part = " ".join(f"^{c}" for c in reversed(prefix))
+            for suffix, sc in self.suffix.most_common(500):
+                if not (2 <= len(suffix) <= 5):
+                    continue
+                app_part = " ".join(f"${c}" for c in suffix)
+                rule = f"{pre_part} {app_part}".strip()
+                if rule not in seen:
+                    seen.add(rule)
+                    self.add_rule(rule, int((pc + sc) * 15))
 
-        # Killer static rules
+        # 5. Killer static rules
         for r in [
             "l c $2 $0 $2 $4 $!", "l c $2 $0 $2 $5", "l c $1 $2 $3 $!",
-            "l c $!", "l $!", "c $!", "l c $1 $2 $3"
+            "l c $!", "l $!", "c $!", "l c $1 $2 $3",
+            "$! $!", "$2 $0 $2 $4", "$2 $0 $2 $5"
         ]:
             self.add_rule(r, 999999)
 
-        for year in [2024,2025,2026,2027,2023,2022]:
-            yf, ys = str(year), str(year)[-2:]
-            for suf in [yf, ys]:
-                rule_digits = " $" + " $".join(suf)
-                self.add_rule(f"l {rule_digits}", 880000)
-                self.add_rule(f"l c {rule_digits}", 870000)
-                self.add_rule(f"l {rule_digits} $!", 860000)
+        # 6. Year appends (2018–2028)
+        for year in range(2018, 2029):
+            for y in [str(year), str(year)[-2:]]:
+                digits = " $" + " $".join(y)
+                self.add_rule(f"l{digits}", 920000)
+                self.add_rule(f"l c{digits}", 910000)
+                self.add_rule(f"l{digits} $!", 900000)
+                self.add_rule(f"l c{digits} $!", 895000)
 
     def write_rules(self):
         log.info("Phase 2/3 → Building elite rule set...")
@@ -152,12 +185,12 @@ class RedTeamArtifactGenerator:
         unique = [r for _, r in self.scored_rules if r not in seen and not seen.add(r)]
 
         def write(path, data):
-            path.write_text("\n".join(data)+"\n" if isinstance(data, list) else data, encoding="utf-8")
-            log.info(f"  → {path.name} ({len(data):,} lines)")
+            path.write_text("\n".join(data) + "\n", encoding="utf-8")
+            log.info(f" → {path.name} ({len(data):,} lines)")
 
-        write(self.out/"01_elite.rule",        unique[:15_000])
-        write(self.out/"02_extended_50k.rule", unique[:50_000])
-        write(self.out/"03_complete.rule",     unique)
+        write(self.out / "01_elite.rule", unique[:15_000])
+        write(self.out / "02_extended_50k.rule", unique[:50_000])
+        write(self.out / "03_complete.rule", unique)
 
     def generate_all_artifacts(self):
         log.info("Phase 3/3 → Generating 8 red-team artifacts...")
@@ -174,13 +207,13 @@ class RedTeamArtifactGenerator:
         sed -E 's/(202[0-9]|19[0-9][0-9]|[!@#$%^&*]+|[0-9]{{3,}}$)//gI' |
         grep -E '^[a-z]{{4,}}[a-z]*$' |
         sort | uniq -c | sort -nr | head -2000000 |
-        awk '{{print $2}}' > "{self.out/'00_real_bases.txt'}"
+        awk '{{print $2}}' > "{self.out / '00_real_bases.txt'}"
         """
         subprocess.run(cmd, shell=True, check=True, executable="/bin/bash")
-        count = int(subprocess.check_output(f"wc -l < \"{self.out/'00_real_bases.txt'}\"", shell=True).strip())
-        log.info(f"  → 00_real_bases.txt ({count:,} bases)")
+        count = int(subprocess.check_output(f"wc -l < \"{self.out / '00_real_bases.txt'}\"", shell=True).strip())
+        log.info(f" → 00_real_bases.txt ({count:,} bases)")
 
-        # 04_corp_patterns.rule — valid
+        # 04_corp_patterns.rule
         corp_words = Counter()
         for pwd in self.passwords:
             for w in re.findall(r'\b[A-Z][a-z]{4,}\b', pwd):
@@ -196,10 +229,10 @@ class RedTeamArtifactGenerator:
                 f"l c {' '.join(f'${c}' for c in low)} $2 $0 $2 $5",
             ])
         corp_rules = list(dict.fromkeys(corp_rules))[:3000]
-        (self.out/"04_corp_patterns.rule").write_text("\n".join(corp_rules)+"\n")
-        log.info(f"  → 04_corp_patterns.rule ({len(corp_rules)} rules)")
+        (self.out / "04_corp_patterns.rule").write_text("\n".join(corp_rules) + "\n")
+        log.info(f" → 04_corp_patterns.rule ({len(corp_rules)} rules)")
 
-        # 05_keyboard_walks.rule — valid
+        # 05_keyboard_walks.rule
         walk_rules = set()
         patterns = ['1qaz','1q2w3e','qwerty','qwer','asdf','zxcv','zaq1','xsw2','cde3','4rfv','5tgb','6yhn','7ujm']
         for pwd in self.passwords:
@@ -213,19 +246,22 @@ class RedTeamArtifactGenerator:
             walk_rules.add(" $" + " $".join(w))
             walk_rules.add(" ^" + " ^".join(w[::-1]))
         walk_rules = list(walk_rules)[:5000]
-        (self.out/"05_keyboard_walks.rule").write_text("\n".join(walk_rules)+"\n")
-        log.info(f"  → 05_keyboard_walks.rule ({len(walk_rules)} rules)")
+        (self.out / "05_keyboard_walks.rule").write_text("\n".join(walk_rules) + "\n")
+        log.info(f" → 05_keyboard_walks.rule ({len(walk_rules)} rules)")
 
         # 06_mask_candidates.hcmask
         mask_counter = Counter()
         for pwd in self.passwords:
-            mask = "".join("?l" if c.islower() else "?u" if c.isupper() else "?d" if c.isdigit() else "?s" for c in pwd)
+            mask = "".join(
+                "?l" if c.islower() else "?u" if c.isupper() else "?d" if c.isdigit() else "?s"
+                for c in pwd
+            )
             mask_counter[mask] += 1
         top_masks = [f"{m},{c}" for m, c in mask_counter.most_common(100)]
-        (self.out/"06_mask_candidates.hcmask").write_text("\n".join(top_masks)+"\n")
-        log.info(f"  → 06_mask_candidates.hcmask (top 100 masks)")
+        (self.out / "06_mask_candidates.hcmask").write_text("\n".join(top_masks) + "\n")
+        log.info(f" → 06_mask_candidates.hcmask (top 100 masks)")
 
-        # 07_years_seasons.rule — 100% valid
+        # 07_years_seasons.rule
         year_rules = []
         for y in range(1990, 2031):
             digits = " $" + " $".join(str(y))
@@ -237,7 +273,7 @@ class RedTeamArtifactGenerator:
         seasons = ["spring","summer","fall","winter","jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"]
         for word in seasons:
             cap = word.capitalize()
-            for yr in ["2024","2025"]:
+            for yr in ["2024","2025","2026"]:
                 ydigits = " $" + " $".join(yr)
                 base_low = " $" + " $".join(word)
                 base_cap = " $" + " $".join(cap)
@@ -247,18 +283,18 @@ class RedTeamArtifactGenerator:
                     f"l c{base_low} $!",
                 ])
         year_rules = list(dict.fromkeys(year_rules))[:10000]
-        (self.out/"07_years_seasons.rule").write_text("\n".join(year_rules)+"\n")
-        log.info(f"  → 07_years_seasons.rule ({len(year_rules)} rules)")
+        (self.out / "07_years_seasons.rule").write_text("\n".join(year_rules) + "\n")
+        log.info(f" → 07_years_seasons.rule ({len(year_rules)} rules)")
 
         # stats.txt
         stats = f"""
 Target Analysis Report — {datetime.now():%Y-%m-%d %H:%M}
 Total passwords parsed: {len(self.passwords):,}
-Top suffixes: {', '.join(k for k, _ in self.suffix.most_common(20))}
-Top prefixes: {', '.join(k for k, _ in self.prefix.most_common(20))}
-"""
-        (self.out/"stats.txt").write_text(stats)
-        log.info(f"  → stats.txt")
+Top prefixes: {', '.join(k for k, _ in self.prefix.most_common(15))}
+Top suffixes: {', '.join(k for k, _ in self.suffix.most_common(15))}
+        """.strip()
+        (self.out / "stats.txt").write_text(stats + "\n")
+        log.info(f" → stats.txt")
 
         tmp_path.unlink(missing_ok=True)
         log.info(f"\nALL DONE! → {self.out.resolve()}")
@@ -267,7 +303,7 @@ Top prefixes: {', '.join(k for k, _ in self.prefix.most_common(20))}
 # CLI
 # =============================================
 def main():
-    parser = argparse.ArgumentParser(description="listminer.py — Red-Team Artifact Generator")
+    parser = argparse.ArgumentParser(description="listminer.py — Password Artifact Generator")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("-f", "--file", type=Path, help="Single password file")
     group.add_argument("-d", "--dir", type=Path, help="Directory with password files")
