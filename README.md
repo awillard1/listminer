@@ -1,6 +1,4 @@
-# ListMiner — PasswordRuleMiner README
-
-# PasswordRuleMiner — Password Artifact Generator
+# ListMiner — PasswordRuleMiner — Password Artifact Generator
 
 **Version:** 2025
 
