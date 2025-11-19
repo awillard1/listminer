@@ -79,8 +79,8 @@ All artifacts are written to the specified output directory.
 | `01_elite.rule`             | Top 15,000 pre-scored Hashcat rules                                  |
 | `02_extended_50k.rule`      | Top 50,000 pre-scored Hashcat rules                                  |
 | `03_complete.rule`          | Complete set of scored rules                                         |
-| `06_mask_candidates.hcmask` | Top 100 mask candidates generated from passwords                     |
-| `07_years_seasons.rule`     | Year and season mutation rules                                       |
+| `04_mask_candidates.hcmask` | Top 100 mask candidates generated from passwords                     |
+| `05_years_seasons.rule`     | Year and season mutation rules                                       |
 | `stats.txt`                 | Summary of total passwords, prefixes, and suffixes                   |
 
 ---
