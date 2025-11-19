@@ -1,143 +1,151 @@
-# ListMiner – Password Artifact Generator
+# ListMiner — PasswordRuleMiner README
 
-`listminer.py` turns **raw password dumps / potfiles** into a full toolkit of **Hashcat-ready artifacts** in a single run:
+# PasswordRuleMiner — Password Artifact Generator
 
-- High-quality **Hashcat rule sets** ranked by real-world frequency  
-- Cleaned **base wordlist** derived from cracked passwords  
-- **Corporate-style pattern rules** (company names, cities, Wi-Fi names, etc.)  
-- **Keyboard walk rules** based on observed patterns  
-- **Mask candidates** with empirical frequency counts  
-- **Year + season helpers** for coverage of predictable patterns  
-- A **stats report** for quick target profiling  
+**Version:** 2025
 
-Designed for red-teamers and password-cracking workflows where you want to squeeze as much value as possible out of recovered passwords.
+## Overview
 
----
+`PasswordRuleMiner` (also known as **ListMiner**) is a Python-based tool designed to generate **Hashcat rules, masks, and username-based password artifacts** from existing potfiles and hashfiles. It is built for red teamers, penetration testers, and security researchers who want to generate highly targeted password mutation rules and candidate wordlists.
 
-## ✨ Features
+**Key Features:**
 
-- **Understands potfiles**  
-  - Parses `hash:plaintext` lines  
-  - Decodes `$HEX[...]` and `\xNN` escape sequences  
-  - Handles plain wordlists as well as Hashcat / John potfiles
-
-- **Smart affix mining**  
-  - Tracks up to 6-character **prefixes** and **suffixes** across all passwords  
-  - Scores longer, higher-value affixes much more heavily  
-  - Builds **Hashcat rules** that prepend (`^`) and append (`$`) those affixes
-
-- **Surround rule synthesis**  
-  - Combines common prefixes/suffixes into **smart surround rules** (prefix + suffix)  
-  - Limited to short, high-impact affixes for better speed/effectiveness
-
-- **Static “killer” rules** baked in  
-  - Curated 2025-style best-guess patterns (capitalization, punctuation, etc.)  
-  - Year-based add-ons (full and 2-digit years, with optional `!`)
-
-- **Multi-artifact output**  
-  From one command, you get:
-  - 3 rule sets (elite / extended / complete)  
-  - Real-world base wordlist  
-  - Corporate pattern rules  
-  - Keyboard walk rules  
-  - Mask candidates with counts  
-  - Year/season helper rules  
-  - Target stats report
-
-- **Nice UX**  
-  - Optional **tqdm** progress bar (auto-disabled if not available)  
-  - Clean logging and Ctrl-C handling (graceful exit)
+* Process single or multiple potfiles and hash files (directory recursion supported)
+* Generate Hashcat prepend and append rules based on real usernames
+* Extract robust usernames from various hash formats including DOMAIN\USER, NTLM, SHA, and Kerberos
+* Generate masks and year/season rules for faster cracking
+* Output statistics, base wordlists, and multiple pre-scored rule files
 
 ---
 
-## 🔧 Requirements
+## Installation
 
-### Runtime
-
-- **Python 3.8+**
-- Recommended on **Linux / macOS / WSL** (uses `/bin/bash` and standard Unix tools)
-
-### Python packages
-
-- Standard library only **plus** (optional):
-  - `tqdm` for progress bars
-
-Install:
+Requires Python 3.8+ and optional `tqdm` for progress bars.
 
 ```bash
 pip install tqdm
 ```
 
-### External tools (for `00_real_bases.txt`)
-
-Uses typical Unix tools (cat, tr, sed, grep, sort, uniq, awk, wc).  
-On Windows, run through WSL.
+Save `listminer.py` to your working directory.
 
 ---
 
-## 📂 Input Formats
+## Usage
 
-Works on:
-- Single file (`-f`)
-- Directory of files (`-d`)
+### Command-line options
 
-Supports:
-- `.txt`, `.pot`, `.potfile`, `.lst`, `.list`, extensionless
+```text
+usage: listminer.py [-h] -p POT [POT ...] [-hf HASHFILE [HASHFILE ...]] [-o OUTPUT]
 
-Understands `hash:plaintext`, `$HEX[...]`, `\xNN`.
+PasswordRuleMiner — Artifact Generator
 
----
+options:
+  -h, --help            show this help message and exit
+  -p POT, --pot POT     Potfile(s) or directory of potfiles (required)
+  -hf HASHFILE, --hashfile HASHFILE
+                        Hashfile(s) or directory of hash files
+  -o OUTPUT, --output OUTPUT
+                        Output directory (default: rules)
+```
 
-## 🚀 Quick Start
+### Examples
+
+#### Generate rules from a potfile directory:
 
 ```bash
-python3 listminer.py -f cracked.pot
-python3 listminer.py -d dumps/
-python3 listminer.py -d dumps/ -o outdir/
+python listminer.py -p ~/hashes/potfiles/ -o output_rules
+```
+
+#### Generate rules from a single potfile and multiple hash files:
+
+```bash
+python listminer.py -p ~/hashes/potfile.txt -hf ~/hashes/hashes1.txt ~/hashes/hashes2.txt -o output_rules
+```
+
+#### Minimal output directory (default `rules`):
+
+```bash
+python listminer.py -p ~/hashes/potfile.txt
 ```
 
 ---
 
-## 📦 Output Artifacts
+## Output Files
 
-All written to output directory:
+All artifacts are written to the specified output directory.
 
-| File | Type | Description |
-|------|------|-------------|
-| `00_real_bases.txt` | wordlist | Clean normalized base words |
-| `01_elite.rule` | rule | Top ~15k |
-| `02_extended_50k.rule` | rule | Top ~50k |
-| `03_complete.rule` | rule | Full deduped rule set |
-| `04_corp_patterns.rule` | rule | Company/city/SSID-based patterns |
-| `05_keyboard_walks.rule` | rule | Keyboard-walk derived rules |
-| `06_mask_candidates.hcmask` | mask | Top 100 masks with counts |
-| `07_years_seasons.rule` | rule | Year + season rules |
-| `stats.txt` | report | Summary of prefix/suffix stats |
-
----
-
-## 🧪 Hashcat Examples
-
-```bash
-hashcat -m 1000 -a 0 hashes.txt 00_real_bases.txt -r 01_elite.rule
-hashcat -m 1000 -a 0 hashes.txt bases.txt -r 03_complete.rule
-hashcat -m 1000 -a 3 hashes.txt ?l?l?l?d?d?d
-```
+| File                        | Description                                                          |
+| --------------------------- | -------------------------------------------------------------------- |
+| `00_real_bases.txt`         | Top base words extracted from potfiles (filtered 4+ character words) |
+| `usernames.txt`             | Unique usernames parsed from hashfiles                               |
+| `01_elite.rule`             | Top 15,000 pre-scored Hashcat rules                                  |
+| `02_extended_50k.rule`      | Top 50,000 pre-scored Hashcat rules                                  |
+| `03_complete.rule`          | Complete set of scored rules                                         |
+| `06_mask_candidates.hcmask` | Top 100 mask candidates generated from passwords                     |
+| `07_years_seasons.rule`     | Year and season mutation rules                                       |
+| `stats.txt`                 | Summary of total passwords, prefixes, and suffixes                   |
 
 ---
 
-## 🔍 How It Works
+## Internal Workflow
 
-1. Load potfiles / wordlists  
-2. Decode plaintext  
-3. Mine prefix/suffix distributions  
-4. Score & generate rules  
-5. Generate artifacts  
-6. Produce stats
+1. **Potfile Processing**
+
+   * Reads potfiles recursively
+   * Decodes `$HEX[...]` and `\xHH` sequences
+   * Builds prefix and suffix frequency counters
+
+2. **Hashfile Processing**
+
+   * Parses usernames from hash files using robust regex patterns
+   * Supports DOMAIN\USER, emails, NTLM, SHA, and Kerberos hashes
+   * Strips domains and cleans invalid entries
+
+3. **Rule Generation**
+
+   * Prepend (reversed) and append (normal) rules based on usernames
+   * Prefix/suffix rules from potfile statistics
+   * Surround rules combining prefixes and suffixes
+   * Static and year rules for common patterns
+
+4. **Masks and Season/Year Rules**
+
+   * Generates character class masks based on passwords
+   * Generates year (1990–2030) and season/month rules
+
+5. **Final Artifact Writing**
+
+   * Writes rule files, username wordlists, masks, and statistics
 
 ---
 
-## ⚠️ Legal Use
+## Regex Patterns Used for Username Extraction
 
-For authorized security testing and research only.
+* `r'^([^:\]+)\\([^:]+):'` — DOMAIN\USER format
+* `r'^([^:]+):[0-9a-fA-F]{16,}$'` — Plain hex hashes
+* `r'^([^:]+):\$[0-9A-Za-z].+'` — MD5, SHA, crypt hashes
+* `r'^([^:]+):[0-9a-fA-F]{16,}:[0-9a-fA-F]{32,}:.+'` — NetNTLM v1/v2
+* `r'^([^:]+):\$krb5[a-z0-9]+\$.*'` — Kerberos tickets
 
+Kerberos lines starting with `$krb5` are skipped unless embedded in username:hash.
+
+---
+
+## Logging & Progress
+
+* Progress bars are displayed if `tqdm` is installed and stdout is a terminal
+* Logs include info on processed files, number of passwords, usernames, and generated rules
+
+---
+
+## Notes
+
+* Designed to work on Linux/macOS; Windows may require `bash` for certain shell commands if you add advanced pipelines
+* Fully compatible with special characters and multi-part usernames
+* Username append and prepend rules are scored and optimized for Hashcat
+
+---
+
+**Author:** Adam Willard
+**License:** MIT
+**Year:** 2025
