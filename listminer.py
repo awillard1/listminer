@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PasswordRuleMiner — Ultimate 2025 Artifact Generator
+PasswordRuleMiner — Password Artifact Generator
 
 Features:
 - Single or multiple potfiles (directory recursion)
@@ -187,7 +187,7 @@ class PasswordRuleMiner:
                     continue
 
                 # If line STARTS with $krb5 → no username → skip
-                if KERB_SKIP_RE.match(line):
+                if self.KERB_SKIP_RE.match(line):
                     continue
 
                 username = None
