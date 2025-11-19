@@ -430,7 +430,7 @@ def main():
     parser = argparse.ArgumentParser(description="PasswordRuleMiner — Artifact Generator")
     parser.add_argument("-p", "--pot", nargs="+", required=True, help="Potfile(s) or directory of potfiles")
     parser.add_argument("-hf", "--hashfile", nargs="*", help="Hashfile(s) or directory of hash files")
-    parser.add_argument("-o", "--output", type=Path, default=Path("rules"), help="Output directory")
+    parser.add_argument("-o", "--output", type=Path, default=Path("listminer"), help="Output directory")
     args = parser.parse_args()
 
     pot_files = find_files(args.pot)
