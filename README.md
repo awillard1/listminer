@@ -140,7 +140,7 @@ Kerberos lines starting with `$krb5` are skipped unless embedded in username:has
 
 ## Notes
 
-* Designed to work on Linux/macOS; Windows may require `bash` for certain shell commands if you add advanced pipelines
+* Designed to work on Linux/WSL/macOS; Windows may require `bash` for certain shell commands if you add advanced pipelines
 * Fully compatible with special characters and multi-part usernames
 * Username append and prepend rules are scored and optimized for Hashcat
 
