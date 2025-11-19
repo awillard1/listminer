@@ -99,6 +99,12 @@ class PasswordRuleMiner:
         self.suffix = Counter()
         self.usernames: Dict[str, List[str]] = defaultdict(list)
 
+        # ======= Fix: Compile the USER_PATTERNS =======
+        self.COMPILED_USER_RE = [re.compile(p) for p in self.USER_PATTERNS]
+
+        # Email cleanup regex
+        self.EMAIL_RE = re.compile(r'^([^@]+)@.+$')
+
     # -------------------------------
     # File parsing
     # -------------------------------
@@ -207,7 +213,7 @@ class PasswordRuleMiner:
                     continue
 
                 # Clean email → user@domain.com → user
-                mail = EMAIL_RE.match(username)
+                mail = self.EMAIL_RE.match(username)
                 if mail:
                     username = mail.group(1)
 
