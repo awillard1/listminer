@@ -150,17 +150,30 @@ class PasswordRuleMiner:
         log.info(f"Collected {total:,} usernames from hash files.")
 
     # =============================================
-    # Username extraction patterns
+    # USERNAME EXTRACTION (robust)
     # =============================================
-    USER_FIRST = [
-        r'^([^:]+):[0-9a-fA-F]{32}$',                      # NTLM
-        r'^([^:]+):[0-9a-fA-F]{40}$',                      # SHA1
-        r'^([^:]+):[0-9a-fA-F]{128}$',                     # SHA512
-        r'^([^:]+):[0-9a-fA-F]{16}:[0-9a-fA-F]{32}:.+$',   # NetNTLMv1
-        r'^([^:]+):[0-9a-fA-F]{32}:[0-9a-fA-F]{32}:.+$',   # NetNTLMv2
-        r'^([^:]+):\$krb5.*',                              # Kerberos
+    USER_PATTERNS = [
+        # DOMAIN\username:hash → capture username (group 2)
+        r'^([^:\\]+)\\([^:]+):',
+
+        # username:NTLM/SHA1/SHA256/... hash (hex only)
+        r'^([^:]+):[0-9a-fA-F]{16,}$',
+
+        # username:$id$hash (e.g., MD5, SHA512, crypt hashes)
+        r'^([^:]+):\$[0-9A-Za-z].+',
+
+        # username:NetNTLMv1/v2 → 16+ hex + 32+ hex + extra
+        r'^([^:]+):[0-9a-fA-F]{16,}:[0-9a-fA-F]{32,}:.+',
+
+        # username:Kerberos AS-REP or TGS tickets
+        r'^([^:]+):\$krb5[a-z0-9]+\$.*',
     ]
-    COMPILED_USER_RE = [re.compile(p) for p in USER_FIRST]
+
+    # Kerberos ticket that starts with $krb5 → skip (service ticket / garbage)
+    KERB_SKIP_RE = re.compile(r'^\$krb5', re.IGNORECASE)
+
+    # Kerberos inside user:hash → allowed
+    KERB_USER_RE = re.compile(r':\$krb5', re.IGNORECASE)
 
     # =============================================
     # File parsing — updated _parse_hashfile
@@ -173,16 +186,45 @@ class PasswordRuleMiner:
                 if not line or line.startswith("#"):
                     continue
 
+                # If line STARTS with $krb5 → no username → skip
+                if KERB_SKIP_RE.match(line):
+                    continue
+
                 username = None
-                for regex in self.COMPILED_USER_RE:
-                    m = regex.match(line)
+
+                # Apply extraction patterns
+                for pat in self.COMPILED_USER_RE:
+                    m = pat.match(line)
                     if m:
-                        username = m.group(1).strip().lower()
+                        # DOMAIN\Alice → real username is group 2
+                        if len(m.groups()) > 1:
+                            username = m.group(2)
+                        else:
+                            username = m.group(1)
                         break
 
-                if username:
-                    self.usernames[username].append("")  # placeholder password
-                    count += 1
+                if not username:
+                    continue
+
+                # Clean email → user@domain.com → user
+                mail = EMAIL_RE.match(username)
+                if mail:
+                    username = mail.group(1)
+
+                username = username.strip().lower()
+
+                # Reject invalid usernames (SPNs, host$, paths, junk)
+                if (not username
+                    or "/" in username
+                    or "," in username
+                    or username.startswith("$")
+                    or username.endswith("$")):
+                    continue
+
+                # Store the username
+                self.usernames[username].append("")
+                count += 1
+
         return count
 
     # -------------------------------
@@ -193,32 +235,26 @@ class PasswordRuleMiner:
         context_count = 0
 
         for username in self.usernames:
-            parts = re.split(r'[\.\-\_\s@]+', username)
+            # Split DOMAIN\USER or email-style usernames
+            parts = re.split(r'[\.\-\_\s@\\]+', username)
             for part in parts:
                 if len(part) < 3:
                     continue
                 low = part.lower()
                 cap = part.capitalize()
 
-                # Prepend reversed word
-                self.scored_rules.append(
-                    (10_000_000, hashcat_prepend(low))
-                )
-                self.scored_rules.append(
-                    (9_900_000, hashcat_prepend(cap))
-                )
+                # Prepend username (reversed)
+                self.scored_rules.append((10_000_000, hashcat_prepend(low)))
+                self.scored_rules.append((9_900_000, hashcat_prepend(cap)))
 
-                # Append common suffixes
-                for suffix in ["123", "2025", "2024", "2023", "!", "!!", "@", "#"]:
-                    self.scored_rules.append(
-                        (9_800_000, f"{hashcat_prepend(low)} {hashcat_append(suffix)}")
-                    )
-                    self.scored_rules.append(
-                        (9_700_000, f"{hashcat_prepend(cap)} {hashcat_append(suffix)}")
-                    )
+                # Append username (normal order)
+                self.scored_rules.append((9_900_000, hashcat_append(low)))
+                self.scored_rules.append((9_800_000, hashcat_append(cap)))
+
                 context_count += 1
 
         log.info(f"Injected {context_count:,} per-user context rules")
+        
     def generate_real_bases(self, top_n: int = 2_000_000):
         log.info("Generating 00_real_bases.txt (base words from potfile passwords)...")
 
@@ -283,7 +319,16 @@ class PasswordRuleMiner:
                     (900_000, f"l{app} $!"),
                     (895_000, f"l c{app} $!"),
                 ])
-
+    def write_username_wordlist(self):
+        """
+        Write a wordlist of unique usernames to a file.
+        """
+        out_file = self.out / "usernames.txt"
+        # Take all keys from self.usernames, sorted
+        usernames = sorted(self.usernames.keys())
+        out_file.write_text("\n".join(usernames) + "\n", encoding="utf-8")
+        log.info(f" → {out_file.name} ({len(usernames):,} unique usernames)")
+    
     def write_rules(self):
         log.info("Writing rule files...")
         self.scored_rules.sort(key=lambda x: x[0], reverse=True)
@@ -354,6 +399,7 @@ Top suffixes: {', '.join(k for k, _ in self.suffix.most_common(15))}
     def generate_all_artifacts(self):
         self.generate_real_bases()
         self.generate_user_context_rules()
+        self.write_username_wordlist() 
         self.generate_prefix_suffix_rules()
         self.generate_surround_rules()
         self.generate_static_and_year_rules()
