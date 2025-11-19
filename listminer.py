@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-listminer.py — Password Artifact Generator (2025 Edition)
-One command → 8 hashcat-ready artifacts
-Correct prepend (^) and append ($) rule generation
-Tested on Python 3.11–3.13 + hashcat 6.2.6+
+PasswordRuleMiner — Ultimate 2025 Artifact Generator
+
+Features:
+- Single or multiple potfiles (directory recursion)
+- Single or multiple hash files (directory recursion)
+- Generates Hashcat prepend/append rules, masks, and year/season rules
+- Fully compatible with complex usernames and special characters
+- Robust logging for every processed file and generation step
 """
 import argparse
 import logging
 import re
 import signal
-import subprocess
-import shlex
 import sys
-import tempfile
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import List, Iterable
+from typing import List, Iterable, Dict
 
 # =============================================
 # PROGRESS BAR
@@ -25,7 +26,7 @@ from typing import List, Iterable
 try:
     from tqdm import tqdm as _tqdm
     TQDM = True
-except Exception:
+except ImportError:
     TQDM = False
 
 def progress(it, **kw):
@@ -53,6 +54,7 @@ HEX_BRACKET_RE = re.compile(r'\$HEX\[[0-9a-fA-F]+\]')
 HEX_ESCAPE_RE = re.compile(r'\\x[0-9a-fA-F]{2}')
 
 def decode_plaintext(text: str) -> str:
+    r"""Decode $HEX[...] and \xHH sequences"""
     if not text:
         return ""
     if text.startswith("$HEX[") and text.endswith("]"):
@@ -62,194 +64,243 @@ def decode_plaintext(text: str) -> str:
             return ""
     return HEX_ESCAPE_RE.sub(lambda m: chr(int(m.group(0)[2:], 16)), text)
 
-def extract_password(line: str) -> str:
+def extract_password_from_pot(line: str) -> str:
     line = line.strip()
     if not line or line.startswith("#"):
         return ""
-    return decode_plaintext(line.rsplit(":", 1)[-1]) if ":" in line else decode_plaintext(line)
+    return decode_plaintext(line.rsplit(":", 1)[-1])
+
+def extract_password_from_wordlist(line: str) -> str:
+    return decode_plaintext(line.strip())
 
 # =============================================
-# Find files
+# Hashcat Rule Helpers
 # =============================================
-def find_password_files(directory: Path) -> List[Path]:
-    exts = {".txt", ".pot", ".potfile", ".lst", ".list", ""}
-    files = [
-        p.resolve() for p in directory.rglob("*")
-        if p.suffix.lower() in exts and p.is_file() and p.stat().st_size > 0
-    ]
-    log.info(f"Found {len(files)} password file(s)")
-    return sorted(files)
+def hashcat_prepend(word: str, reverse: bool = True) -> str:
+    """Generate Hashcat prepend rule (^ per char), optionally reversed"""
+    if reverse:
+        word = word[::-1]
+    return " ".join(f"^{c}" for c in word)
+
+def hashcat_append(word: str) -> str:
+    """Generate Hashcat append rule ($ per char)"""
+    return " ".join(f"${c}" for c in word)
 
 # =============================================
-# MAIN CLASS — ELITE EDITION
+# MAIN CLASS — PASSWORD RULE MINER
 # =============================================
-class RedTeamArtifactGenerator:
+class PasswordRuleMiner:
     def __init__(self, output_dir: Path):
         self.out = output_dir
         self.out.mkdir(parents=True, exist_ok=True)
         self.scored_rules = []
-        self.passwords = []
+        self.passwords: List[str] = []
         self.prefix = Counter()
         self.suffix = Counter()
+        self.usernames: Dict[str, List[str]] = defaultdict(list)
 
-    def add_rule(self, rule: str, score: int):
-        if r := rule.strip():
-            self.scored_rules.append((score, r))
-
-    def mine_passwords(self, files: Iterable[Path]):
-        log.info("Phase 1/3: Mining passwords and affixes...")
+    # -------------------------------
+    # File parsing
+    # -------------------------------
+    def mine_potfiles(self, files: Iterable[Path]):
         total = 0
-        for file in files:
-            size_mb = file.stat().st_size // 1048576
-            log.info(f" → {file.name} ({size_mb} MB)")
-            with file.open("r", encoding="utf-8", errors="ignore") as f:
-                for line in progress(f, desc=file.stem[:30], leave=False):
-                    pwd = extract_password(line)
-                    if pwd and len(pwd) >= 6:
-                        self.passwords.append(pwd)
-                        total += 1
-                        n = min(6, len(pwd))
-                        for i in range(1, n + 1):
-                            self.prefix[pwd[:i]] += 1
-                            self.suffix[pwd[-i:]] += 1
-        log.info(f"Successfully parsed {total:,} passwords")
+        log.info("Phase 1/3: Mining potfiles...")
+        for f in files:
+            fpath = f.expanduser().resolve()
+            if fpath.is_dir():
+                for subfile in progress(list(fpath.rglob("*")), desc=f"{fpath.name} (dir)", leave=False):
+                    if subfile.is_file() and subfile.stat().st_size > 0:
+                        log.info(f"Reading potfile: {subfile}")
+                        total += self._parse_potfile(subfile)
+            elif fpath.is_file():
+                log.info(f"Reading potfile: {fpath}")
+                total += self._parse_potfile(fpath)
+        log.info(f"Collected {total:,} plaintext passwords from potfiles.")
 
-        # ==================================================================
-        # ELITE RULE GENERATION — PREPEND & APPEND 100% CORRECT
-        # ==================================================================
-        log.info("Generating elite rules — prepends reversed, appends forward...")
+        # Build prefix/suffix counters
+        for pwd in self.passwords:
+            n = min(6, len(pwd))
+            for i in range(1, n + 1):
+                self.prefix[pwd[:i]] += 1
+                self.suffix[pwd[-i:]] += 1
 
-        # 1. PURE PREPEND RULES (highest priority — perfect for -a 6)
+    def _parse_potfile(self, path: Path) -> int:
+        count = 0
+        with path.open("r", encoding="utf-8", errors="ignore") as f:
+            for line in progress(f, desc=path.stem[:30], leave=False):
+                pwd = extract_password_from_pot(line)
+                if pwd and len(pwd) >= 1:
+                    self.passwords.append(pwd)
+                    count += 1
+        return count
+
+    def mine_hashfiles(self, files: Iterable[Path]):
+        total = 0
+        log.info("Phase 1b: Mining hash files for usernames...")
+        for f in files:
+            fpath = Path(f).expanduser().resolve()
+            if fpath.is_dir():
+                for subfile in progress(list(fpath.rglob("*")), desc=f"{fpath.name} (dir)", leave=False):
+                    if subfile.is_file() and subfile.stat().st_size > 0:
+                        log.info(f"Reading hashfile: {subfile}")
+                        total += self._parse_hashfile(subfile)
+            elif fpath.is_file():
+                log.info(f"Reading hashfile: {fpath}")
+                total += self._parse_hashfile(fpath)
+        log.info(f"Collected {total:,} usernames from hash files.")
+
+    # =============================================
+    # Username extraction patterns
+    # =============================================
+    USER_FIRST = [
+        r'^([^:]+):[0-9a-fA-F]{32}$',                      # NTLM
+        r'^([^:]+):[0-9a-fA-F]{40}$',                      # SHA1
+        r'^([^:]+):[0-9a-fA-F]{128}$',                     # SHA512
+        r'^([^:]+):[0-9a-fA-F]{16}:[0-9a-fA-F]{32}:.+$',   # NetNTLMv1
+        r'^([^:]+):[0-9a-fA-F]{32}:[0-9a-fA-F]{32}:.+$',   # NetNTLMv2
+        r'^([^:]+):\$krb5.*',                              # Kerberos
+    ]
+    COMPILED_USER_RE = [re.compile(p) for p in USER_FIRST]
+
+    # =============================================
+    # File parsing — updated _parse_hashfile
+    # =============================================
+    def _parse_hashfile(self, path: Path) -> int:
+        count = 0
+        with path.open("r", encoding="utf-8", errors="ignore") as f:
+            for line in progress(f, desc=path.stem[:30], leave=False):
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+
+                username = None
+                for regex in self.COMPILED_USER_RE:
+                    m = regex.match(line)
+                    if m:
+                        username = m.group(1).strip().lower()
+                        break
+
+                if username:
+                    self.usernames[username].append("")  # placeholder password
+                    count += 1
+        return count
+
+    # -------------------------------
+    # Rule generation
+    # -------------------------------
+    def generate_user_context_rules(self):
+        log.info("Generating per-username context rules...")
+        context_count = 0
+
+        for username in self.usernames:
+            parts = re.split(r'[\.\-\_\s@]+', username)
+            for part in parts:
+                if len(part) < 3:
+                    continue
+                low = part.lower()
+                cap = part.capitalize()
+
+                # Prepend reversed word
+                self.scored_rules.append(
+                    (10_000_000, hashcat_prepend(low))
+                )
+                self.scored_rules.append(
+                    (9_900_000, hashcat_prepend(cap))
+                )
+
+                # Append common suffixes
+                for suffix in ["123", "2025", "2024", "2023", "!", "!!", "@", "#"]:
+                    self.scored_rules.append(
+                        (9_800_000, f"{hashcat_prepend(low)} {hashcat_append(suffix)}")
+                    )
+                    self.scored_rules.append(
+                        (9_700_000, f"{hashcat_prepend(cap)} {hashcat_append(suffix)}")
+                    )
+                context_count += 1
+
+        log.info(f"Injected {context_count:,} per-user context rules")
+    def generate_real_bases(self, top_n: int = 2_000_000):
+        log.info("Generating 00_real_bases.txt (base words from potfile passwords)...")
+
+        counter = Counter()
+        for pwd in self.passwords:
+            pwd = pwd.lower()
+            # Remove years, special chars, trailing numbers
+            pwd = re.sub(r'(202[0-9]|19[0-9]{2}|[!@#$%^&*]+|[0-9]{3,}$)', '', pwd, flags=re.I)
+            if re.fullmatch(r'[a-z]{4,}', pwd):
+                counter[pwd] += 1
+
+        # Keep top_n most common
+        top_bases = [word for word, _ in counter.most_common(top_n)]
+
+        out_file = self.out / "00_real_bases.txt"
+        out_file.write_text("\n".join(top_bases) + "\n", encoding="utf-8")
+        log.info(f" → 00_real_bases.txt ({len(top_bases):,} bases)")
+    
+    def generate_prefix_suffix_rules(self):
+        log.info("Generating prefix/suffix rules from potfile passwords...")
         for prefix, count in self.prefix.most_common(2000):
-            if len(prefix) < 2:
-                continue
-            bonus = min(len(prefix), 6) ** 3.6
-            rule = " ".join(f"^{c}" for c in reversed(prefix))
-            self.scored_rules.append((int(count * bonus * 40), rule))
-
-        # 2. PURE APPEND RULES (very high priority)
-        for suffix, count in self.suffix.most_common(1600):
-            if len(suffix) < 2:
-                continue
-            bonus = min(len(suffix), 6) ** 3.3
-            rule = " ".join(f"${c}" for c in suffix)
-            self.scored_rules.append((int(count * bonus * 30), rule))
-
-        # 3. Classic prepend & append
-        for prefix, count in self.prefix.most_common(1200):
             if len(prefix) >= 2:
-                rule = " ".join(f"^{c}" for c in reversed(prefix))
-                self.add_rule(rule, int(count * 180))
-
-        for suffix, count in self.suffix.most_common(1200):
+                rule = hashcat_prepend(prefix)
+                score = int(count * (len(prefix) ** 3.6) * 38)
+                self.scored_rules.append((score, rule))
+        for suffix, count in self.suffix.most_common(1600):
             if len(suffix) >= 2:
-                rule = " ".join(f"${c}" for c in suffix)
-                self.add_rule(rule, int(count * 180))
+                rule = hashcat_append(suffix)
+                score = int(count * (len(suffix) ** 3.3) * 32)
+                self.scored_rules.append((score, rule))
 
-        # 4. Surround rules (best prefix + best suffix)
+    def generate_surround_rules(self):
+        log.info("Generating surround rules...")
         seen = set()
         for prefix, pc in self.prefix.most_common(500):
-            if not (2 <= len(prefix) <= 5):
+            if not 2 <= len(prefix) <= 5:
                 continue
-            pre_part = " ".join(f"^{c}" for c in reversed(prefix))
+            pre = hashcat_prepend(prefix)
             for suffix, sc in self.suffix.most_common(500):
-                if not (2 <= len(suffix) <= 5):
+                if not 2 <= len(suffix) <= 5:
                     continue
-                app_part = " ".join(f"${c}" for c in suffix)
-                rule = f"{pre_part} {app_part}".strip()
+                app = hashcat_append(suffix)
+                rule = f"{pre} {app}".strip()
                 if rule not in seen:
                     seen.add(rule)
-                    self.add_rule(rule, int((pc + sc) * 15))
+                    self.scored_rules.append((int((pc + sc) * 18), rule))
 
-        # 5. Killer static rules
-        for r in [
+    def generate_static_and_year_rules(self):
+        log.info("Generating static and year rules...")
+        static_rules = [
             "l c $2 $0 $2 $4 $!", "l c $2 $0 $2 $5", "l c $1 $2 $3 $!",
-            "l c $!", "l $!", "c $!", "l c $1 $2 $3",
-            "$! $!", "$2 $0 $2 $4", "$2 $0 $2 $5"
-        ]:
-            self.add_rule(r, 999999)
-
-        # 6. Year appends (2018–2028)
-        for year in range(2018, 2029):
+            "l c $!", "l $!", "c $!", "$! $!", "$2 $0 $2 $4", "$2 $0 $2 $5"
+        ]
+        for r in static_rules:
+            self.scored_rules.append((999_999, r))
+        for year in range(2018, 2031):
             for y in [str(year), str(year)[-2:]]:
-                digits = " $" + " $".join(y)
-                self.add_rule(f"l{digits}", 920000)
-                self.add_rule(f"l c{digits}", 910000)
-                self.add_rule(f"l{digits} $!", 900000)
-                self.add_rule(f"l c{digits} $!", 895000)
+                app = hashcat_append(y)
+                self.scored_rules.extend([
+                    (920_000, f"l{app}"),
+                    (910_000, f"l c{app}"),
+                    (900_000, f"l{app} $!"),
+                    (895_000, f"l c{app} $!"),
+                ])
 
     def write_rules(self):
-        log.info("Phase 2/3 → Building elite rule set...")
+        log.info("Writing rule files...")
         self.scored_rules.sort(key=lambda x: x[0], reverse=True)
         seen = set()
-        unique = [r for _, r in self.scored_rules if r not in seen and not seen.add(r)]
+        unique_rules = [r for _, r in self.scored_rules if r not in seen and not seen.add(r)]
 
-        def write(path, data):
+        def write_file(path, data):
             path.write_text("\n".join(data) + "\n", encoding="utf-8")
             log.info(f" → {path.name} ({len(data):,} lines)")
 
-        write(self.out / "01_elite.rule", unique[:15_000])
-        write(self.out / "02_extended_50k.rule", unique[:50_000])
-        write(self.out / "03_complete.rule", unique)
+        write_file(self.out / "01_elite.rule", unique_rules[:15_000])
+        write_file(self.out / "02_extended_50k.rule", unique_rules[:50_000])
+        write_file(self.out / "03_complete.rule", unique_rules)
 
-    def generate_all_artifacts(self):
-        log.info("Phase 3/3 → Generating 8 red-team artifacts...")
-
-        # 00_real_bases.txt
-        with tempfile.NamedTemporaryFile(mode="w+", delete=False, encoding="utf-8") as tmp:
-            for pwd in self.passwords:
-                print(pwd, file=tmp)
-            tmp_path = Path(tmp.name)
-
-        cmd = f"""
-        cat {shlex.quote(str(tmp_path))} |
-        tr '[:upper:]' '[:lower:]' |
-        sed -E 's/(202[0-9]|19[0-9][0-9]|[!@#$%^&*]+|[0-9]{{3,}}$)//gI' |
-        grep -E '^[a-z]{{4,}}[a-z]*$' |
-        sort | uniq -c | sort -nr | head -2000000 |
-        awk '{{print $2}}' > "{self.out / '00_real_bases.txt'}"
-        """
-        subprocess.run(cmd, shell=True, check=True, executable="/bin/bash")
-        count = int(subprocess.check_output(f"wc -l < \"{self.out / '00_real_bases.txt'}\"", shell=True).strip())
-        log.info(f" → 00_real_bases.txt ({count:,} bases)")
-
-        # 04_corp_patterns.rule
-        corp_words = Counter()
-        for pwd in self.passwords:
-            for w in re.findall(r'\b[A-Z][a-z]{4,}\b', pwd):
-                corp_words[w] += 1
-        corp_rules = []
-        for word, _ in corp_words.most_common(500):
-            low = word.lower()
-            cap = word.capitalize()
-            corp_rules.extend([
-                f"l c {' '.join(f'${c}' for c in low)}",
-                f"l c {' '.join(f'${c}' for c in low)} $!",
-                f"l {' '.join(f'${c}' for c in cap)} $!",
-                f"l c {' '.join(f'${c}' for c in low)} $2 $0 $2 $5",
-            ])
-        corp_rules = list(dict.fromkeys(corp_rules))[:3000]
-        (self.out / "04_corp_patterns.rule").write_text("\n".join(corp_rules) + "\n")
-        log.info(f" → 04_corp_patterns.rule ({len(corp_rules)} rules)")
-
-        # 05_keyboard_walks.rule
-        walk_rules = set()
-        patterns = ['1qaz','1q2w3e','qwerty','qwer','asdf','zxcv','zaq1','xsw2','cde3','4rfv','5tgb','6yhn','7ujm']
-        for pwd in self.passwords:
-            low = pwd.lower()
-            for pat in patterns:
-                if pat in low:
-                    walk_rules.add(" $" + " $".join(pat))
-                    walk_rules.add(" ^" + " ^".join(pat[::-1]))
-        full = ['1q2w3e4r','qwertyuiop','asdfghjkl','zxcvbnm']
-        for w in full:
-            walk_rules.add(" $" + " $".join(w))
-            walk_rules.add(" ^" + " ^".join(w[::-1]))
-        walk_rules = list(walk_rules)[:5000]
-        (self.out / "05_keyboard_walks.rule").write_text("\n".join(walk_rules) + "\n")
-        log.info(f" → 05_keyboard_walks.rule ({len(walk_rules)} rules)")
-
-        # 06_mask_candidates.hcmask
+    def generate_masks_and_years(self):
+        log.info("Generating masks and year/season rules...")
+        # Mask candidates
         mask_counter = Counter()
         for pwd in self.passwords:
             mask = "".join(
@@ -261,22 +312,23 @@ class RedTeamArtifactGenerator:
         (self.out / "06_mask_candidates.hcmask").write_text("\n".join(top_masks) + "\n")
         log.info(f" → 06_mask_candidates.hcmask (top 100 masks)")
 
-        # 07_years_seasons.rule
+        # Year/season rules
         year_rules = []
         for y in range(1990, 2031):
-            digits = " $" + " $".join(str(y))
+            digits = hashcat_append(str(y))
             year_rules.extend([f"l{digits}", f"l c{digits}", f"l{digits} $!", f"l c{digits} $!"])
         for y in range(20, 31):
             short = f"{y:02d}"
-            digits = " $" + " $".join(short)
+            digits = hashcat_append(short)
             year_rules.extend([f"l{digits}", f"l c{digits}", f"l{digits} $!", f"l c{digits} $!"])
-        seasons = ["spring","summer","fall","winter","jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"]
+        seasons = ["spring","summer","fall","winter","jan","feb","mar","apr","may","jun",
+                   "jul","aug","sep","oct","nov","dec"]
         for word in seasons:
             cap = word.capitalize()
             for yr in ["2024","2025","2026"]:
-                ydigits = " $" + " $".join(yr)
-                base_low = " $" + " $".join(word)
-                base_cap = " $" + " $".join(cap)
+                ydigits = hashcat_append(yr)
+                base_low = hashcat_append(word)
+                base_cap = hashcat_append(cap)
                 year_rules.extend([
                     f"l c{base_low}{ydigits}",
                     f"l c{base_cap}{ydigits}",
@@ -284,9 +336,9 @@ class RedTeamArtifactGenerator:
                 ])
         year_rules = list(dict.fromkeys(year_rules))[:10000]
         (self.out / "07_years_seasons.rule").write_text("\n".join(year_rules) + "\n")
-        log.info(f" → 07_years_seasons.rule ({len(year_rules)} rules)")
+        log.info(f" → 07_years_seasons.rule ({len(year_rules)})")
 
-        # stats.txt
+        # Stats
         stats = f"""
 Target Analysis Report — {datetime.now():%Y-%m-%d %H:%M}
 Total passwords parsed: {len(self.passwords):,}
@@ -296,29 +348,51 @@ Top suffixes: {', '.join(k for k, _ in self.suffix.most_common(15))}
         (self.out / "stats.txt").write_text(stats + "\n")
         log.info(f" → stats.txt")
 
-        tmp_path.unlink(missing_ok=True)
+    # -------------------------------
+    # Full artifact generation
+    # -------------------------------
+    def generate_all_artifacts(self):
+        self.generate_real_bases()
+        self.generate_user_context_rules()
+        self.generate_prefix_suffix_rules()
+        self.generate_surround_rules()
+        self.generate_static_and_year_rules()
+        self.write_rules()
+        self.generate_masks_and_years()
         log.info(f"\nALL DONE! → {self.out.resolve()}")
 
 # =============================================
 # CLI
 # =============================================
+def find_files(paths: List[str]) -> List[Path]:
+    out = []
+    for p in paths:
+        ppath = Path(p).expanduser()
+        if ppath.is_dir():
+            out.extend(ppath.rglob("*"))
+        elif ppath.is_file():
+            out.append(ppath)
+    return sorted([f for f in out if f.is_file() and f.stat().st_size > 0])
+
 def main():
-    parser = argparse.ArgumentParser(description="listminer.py — Password Artifact Generator")
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("-f", "--file", type=Path, help="Single password file")
-    group.add_argument("-d", "--dir", type=Path, help="Directory with password files")
-    parser.add_argument("-o", "--output", type=Path, default=Path("listminer_output"), help="Output directory")
+    parser = argparse.ArgumentParser(description="PasswordRuleMiner — Artifact Generator")
+    parser.add_argument("-p", "--pot", nargs="+", required=True, help="Potfile(s) or directory of potfiles")
+    parser.add_argument("-hf", "--hashfile", nargs="*", help="Hashfile(s) or directory of hash files")
+    parser.add_argument("-o", "--output", type=Path, default=Path("rules"), help="Output directory")
     args = parser.parse_args()
 
-    files = [args.file.resolve()] if args.file else find_password_files(args.dir)
-    if not files:
-        log.error("No files found!")
+    pot_files = find_files(args.pot)
+    if not pot_files:
+        log.error("No potfiles found! Exiting.")
         sys.exit(1)
 
-    gen = RedTeamArtifactGenerator(args.output)
-    gen.mine_passwords(files)
-    gen.write_rules()
-    gen.generate_all_artifacts()
+    hash_files = find_files(args.hashfile) if args.hashfile else []
+
+    miner = PasswordRuleMiner(args.output)
+    miner.mine_potfiles(pot_files)
+    if hash_files:
+        miner.mine_hashfiles(hash_files)
+    miner.generate_all_artifacts()
 
 if __name__ == "__main__":
     main()
