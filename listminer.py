@@ -360,8 +360,8 @@ class PasswordRuleMiner:
             )
             mask_counter[mask] += 1
         top_masks = [f"{m},{c}" for m, c in mask_counter.most_common(100)]
-        (self.out / "06_mask_candidates.hcmask").write_text("\n".join(top_masks) + "\n")
-        log.info(f" → 06_mask_candidates.hcmask (top 100 masks)")
+        (self.out / "04_mask_candidates.hcmask").write_text("\n".join(top_masks) + "\n")
+        log.info(f" → 04_mask_candidates.hcmask (top 100 masks)")
 
         # Year/season rules
         year_rules = []
@@ -386,8 +386,8 @@ class PasswordRuleMiner:
                     f"l c{base_low} $!",
                 ])
         year_rules = list(dict.fromkeys(year_rules))[:10000]
-        (self.out / "07_years_seasons.rule").write_text("\n".join(year_rules) + "\n")
-        log.info(f" → 07_years_seasons.rule ({len(year_rules)})")
+        (self.out / "05_years_seasons.rule").write_text("\n".join(year_rules) + "\n")
+        log.info(f" → 05_years_seasons.rule ({len(year_rules)})")
 
         # Stats
         stats = f"""
