@@ -13,6 +13,7 @@ Features:
 import argparse
 import hashlib
 import logging
+import os
 import pickle
 import re
 import signal
@@ -39,11 +40,13 @@ def progress(it, **kw):
 # =============================================
 # PARALLEL PROCESSING CONFIGURATION
 # =============================================
-import os
-
 # Determine optimal worker count (CPU count or environment variable)
 DEFAULT_WORKERS = min(8, (os.cpu_count() or 4))
 MAX_WORKERS = int(os.environ.get('LISTMINER_MAX_WORKERS', DEFAULT_WORKERS))
+
+# Batch multiplier for load balancing across workers
+# Higher values create more batches for better distribution and progress tracking
+BATCH_MULTIPLIER = 4
 
 # =============================================
 # Logging
@@ -502,8 +505,11 @@ class PasswordRuleMiner:
     # -------------------------------
     @staticmethod
     def _calculate_batch_size_for_workers(items_count: int, max_workers: int, min_batch_size: int = 1000) -> int:
-        """Calculate optimal batch size for parallel processing"""
-        return max(min_batch_size, items_count // (max_workers * 4))
+        """
+        Calculate optimal batch size for parallel processing.
+        Uses BATCH_MULTIPLIER to ensure enough batches for load balancing.
+        """
+        return max(min_batch_size, items_count // (max_workers * BATCH_MULTIPLIER))
     
     def _calculate_batch_size(self, items_count: int, min_batch_size: int = 1000) -> int:
         """Calculate optimal batch size for parallel processing using instance workers"""
@@ -1280,8 +1286,8 @@ class PasswordRuleMiner:
                     batch_rules.append((score, rule))
             return batch_rules
         
-        # Create batches for parallel processing
-        batch_size = max(10, len(top_words) // (self.max_workers * 2))
+        # Create batches for parallel processing (smaller batches for word processing)
+        batch_size = self._calculate_batch_size_for_workers(len(top_words), self.max_workers, 10)
         word_batches = [
             top_words[i:i + batch_size]
             for i in range(0, len(top_words), batch_size)
