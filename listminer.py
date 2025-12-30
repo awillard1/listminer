@@ -114,7 +114,7 @@ def generate_leet_rules(word: str, max_substitutions: int = 2) -> List[str]:
         return rules
     
     # Single substitutions
-    for pos, char in positions:
+    for _, char in positions:
         for leet_char in LEET_MAP[char]:
             rule = f"s{char}{leet_char}"
             rules.append(rule)
@@ -123,8 +123,8 @@ def generate_leet_rules(word: str, max_substitutions: int = 2) -> List[str]:
     if len(positions) >= 2 and max_substitutions >= 2:
         for i in range(len(positions)):
             for j in range(i + 1, min(i + 4, len(positions))):
-                pos1, char1 = positions[i]
-                pos2, char2 = positions[j]
+                _, char1 = positions[i]
+                _, char2 = positions[j]
                 for leet1 in LEET_MAP[char1]:
                     for leet2 in LEET_MAP[char2]:
                         rule = f"s{char1}{leet1} s{char2}{leet2}"
