@@ -37,7 +37,8 @@ Save `listminer.py` to your working directory.
 ### Command-line options
 
 ```text
-usage: listminer.py [-h] -p POT [POT ...] [-hf HASHFILE [HASHFILE ...]] [-o OUTPUT]
+usage: listminer.py [-h] -p POT [POT ...] [-hf [HASHFILE ...]] [-o OUTPUT] 
+                    [--no-cache] [--clear-cache]
 
 PasswordRuleMiner — Artifact Generator
 
@@ -47,7 +48,30 @@ options:
   -hf HASHFILE, --hashfile HASHFILE
                         Hashfile(s) or directory of hash files
   -o OUTPUT, --output OUTPUT
-                        Output directory (default: rules)
+                        Output directory (default: listminer)
+  --no-cache            Disable caching of processed files
+  --clear-cache         Clear cache and exit
+```
+
+### Caching
+
+**NEW:** ListMiner now includes intelligent file caching to speed up processing when files haven't changed.
+
+- **Automatic caching**: Processed potfiles and hashfiles are cached by default
+- **Cache validation**: Uses file size and modification time to detect changes
+- **Cache location**: Stored in `.listminer_cache/` within the output directory
+- **Performance**: Significantly faster for repeated runs with unchanged files
+
+**Cache options:**
+```bash
+# Normal run with caching (default)
+python3 listminer.py -p potfile.pot -hf hashfile.txt -o output
+
+# Disable caching for a single run
+python3 listminer.py -p potfile.pot --no-cache -o output
+
+# Clear all cached data
+python3 listminer.py -p potfile.pot -o output --clear-cache
 ```
 
 ### Examples

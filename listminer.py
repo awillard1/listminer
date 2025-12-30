@@ -11,7 +11,9 @@ Features:
 - Robust logging for every processed file and generation step
 """
 import argparse
+import hashlib
 import logging
+import pickle
 import re
 import signal
 import sys
@@ -46,6 +48,69 @@ def sigint_handler(signum, frame):
     log.warning("\nInterrupted by user — exiting cleanly")
     sys.exit(0)
 signal.signal(signal.SIGINT, sigint_handler)
+
+# =============================================
+# FILE CACHE
+# =============================================
+class FileCache:
+    """
+    Caching system for processed potfiles and hashfiles.
+    Uses file modification time and size for cache validation.
+    """
+    
+    def __init__(self, cache_dir: Path):
+        self.cache_dir = cache_dir
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.enabled = True
+    
+    def _get_file_key(self, filepath: Path) -> str:
+        """Generate a unique cache key for a file"""
+        stat = filepath.stat()
+        # Use path, size, and mtime for cache key
+        key_str = f"{filepath.resolve()}:{stat.st_size}:{stat.st_mtime}"
+        return hashlib.md5(key_str.encode()).hexdigest()
+    
+    def _get_cache_path(self, filepath: Path, cache_type: str) -> Path:
+        """Get the cache file path for a given file"""
+        key = self._get_file_key(filepath)
+        return self.cache_dir / f"{cache_type}_{key}.pkl"
+    
+    def get(self, filepath: Path, cache_type: str) -> Optional[any]:
+        """Retrieve cached data for a file if valid"""
+        if not self.enabled:
+            return None
+        
+        cache_path = self._get_cache_path(filepath, cache_type)
+        if not cache_path.exists():
+            return None
+        
+        try:
+            with cache_path.open('rb') as f:
+                cached_data = pickle.load(f)
+            log.info(f"  → Using cached data for {filepath.name}")
+            return cached_data
+        except (pickle.PickleError, EOFError, FileNotFoundError):
+            # Cache corrupted or invalid
+            cache_path.unlink(missing_ok=True)
+            return None
+    
+    def set(self, filepath: Path, cache_type: str, data: any):
+        """Store data in cache for a file"""
+        if not self.enabled:
+            return
+        
+        cache_path = self._get_cache_path(filepath, cache_type)
+        try:
+            with cache_path.open('wb') as f:
+                pickle.dump(data, f)
+        except (pickle.PickleError, OSError) as e:
+            log.warning(f"Failed to cache {filepath.name}: {e}")
+    
+    def clear(self):
+        """Clear all cache files"""
+        for cache_file in self.cache_dir.glob("*.pkl"):
+            cache_file.unlink(missing_ok=True)
+        log.info("Cache cleared")
 
 # =============================================
 # Password decoding
@@ -321,7 +386,7 @@ class PasswordTrie:
 # MAIN CLASS — PASSWORD RULE MINER
 # =============================================
 class PasswordRuleMiner:
-    def __init__(self, output_dir: Path):
+    def __init__(self, output_dir: Path, use_cache: bool = True):
         self.out = output_dir
         self.out.mkdir(parents=True, exist_ok=True)
         self.scored_rules = []
@@ -333,6 +398,11 @@ class PasswordRuleMiner:
         # Advanced features
         self.trie = PasswordTrie()
         self.bfs_generator = BFSRuleGenerator(max_depth=3)
+        
+        # Caching
+        cache_dir = self.out / ".listminer_cache"
+        self.cache = FileCache(cache_dir)
+        self.cache.enabled = use_cache
 
         # ======= Fix: Compile the USER_PATTERNS =======
         self.COMPILED_USER_RE = [re.compile(p) for p in self.USER_PATTERNS]
@@ -366,13 +436,26 @@ class PasswordRuleMiner:
                 self.suffix[pwd[-i:]] += 1
 
     def _parse_potfile(self, path: Path) -> int:
+        # Check cache first
+        cached_data = self.cache.get(path, "potfile")
+        if cached_data is not None:
+            passwords, count = cached_data
+            self.passwords.extend(passwords)
+            return count
+        
+        # Parse file
         count = 0
+        passwords = []
         with path.open("r", encoding="utf-8", errors="ignore") as f:
             for line in progress(f, desc=path.stem[:30], leave=False):
                 pwd = extract_password_from_pot(line)
                 if pwd and len(pwd) >= 1:
-                    self.passwords.append(pwd)
+                    passwords.append(pwd)
                     count += 1
+        
+        # Store in cache
+        self.cache.set(path, "potfile", (passwords, count))
+        self.passwords.extend(passwords)
         return count
 
     def mine_hashfiles(self, files: Iterable[Path]):
@@ -420,7 +503,17 @@ class PasswordRuleMiner:
     # File parsing — updated _parse_hashfile
     # =============================================
     def _parse_hashfile(self, path: Path) -> int:
+        # Check cache first
+        cached_data = self.cache.get(path, "hashfile")
+        if cached_data is not None:
+            usernames_dict, count = cached_data
+            for username in usernames_dict:
+                self.usernames[username].append("")
+            return count
+        
+        # Parse file
         count = 0
+        usernames_dict = {}
         with path.open("r", encoding="utf-8", errors="ignore") as f:
             for line in progress(f, desc=path.stem[:30], leave=False):
                 line = line.strip()
@@ -463,9 +556,12 @@ class PasswordRuleMiner:
                     continue
 
                 # Store the username
+                usernames_dict[username] = True
                 self.usernames[username].append("")
                 count += 1
-
+        
+        # Store in cache
+        self.cache.set(path, "hashfile", (usernames_dict, count))
         return count
 
     # -------------------------------
@@ -750,7 +846,16 @@ def main():
     parser.add_argument("-p", "--pot", nargs="+", required=True, help="Potfile(s) or directory of potfiles")
     parser.add_argument("-hf", "--hashfile", nargs="*", help="Hashfile(s) or directory of hash files")
     parser.add_argument("-o", "--output", type=Path, default=Path("listminer"), help="Output directory")
+    parser.add_argument("--no-cache", action="store_true", help="Disable caching of processed files")
+    parser.add_argument("--clear-cache", action="store_true", help="Clear cache and exit")
     args = parser.parse_args()
+    
+    # Handle cache clearing
+    if args.clear_cache:
+        cache_dir = args.output / ".listminer_cache"
+        cache = FileCache(cache_dir)
+        cache.clear()
+        return
 
     pot_files = find_files(args.pot)
     if not pot_files:
@@ -759,7 +864,11 @@ def main():
 
     hash_files = find_files(args.hashfile) if args.hashfile else []
 
-    miner = PasswordRuleMiner(args.output)
+    use_cache = not args.no_cache
+    if use_cache:
+        log.info("File caching enabled (use --no-cache to disable)")
+    
+    miner = PasswordRuleMiner(args.output, use_cache=use_cache)
     miner.mine_potfiles(pot_files)
     if hash_files:
         miner.mine_hashfiles(hash_files)
