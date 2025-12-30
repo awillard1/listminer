@@ -139,6 +139,8 @@ All artifacts are written to the specified output directory.
 | --------------------------- | -------------------------------------------------------------------- |
 | `00_real_bases.txt`         | Top base words extracted from potfiles (filtered 4+ character words) |
 | `00_trie_bases.txt`         | **NEW:** Enhanced base words using trie-based pattern analysis       |
+| `00_analyzed_bases.txt`     | Base words from comprehensive password transformation analysis       |
+| `00_unified_passwords.txt`  | **Unified file:** All bases + usernames combined, sorted, and unique |
 | `usernames.txt`             | Unique usernames parsed from hashfiles                               |
 | `01_elite.rule`             | Top 15,000 pre-scored Hashcat rules (includes advanced features)     |
 | `02_extended_50k.rule`      | Top 50,000 pre-scored Hashcat rules (includes advanced features)     |
@@ -146,6 +148,31 @@ All artifacts are written to the specified output directory.
 | `04_mask_candidates.hcmask` | Top 100 mask candidates generated from passwords                     |
 | `05_years_seasons.rule`     | Year and season mutation rules                                       |
 | `stats.txt`                 | Summary of total passwords, prefixes, and suffixes                   |
+
+### Unified Password File
+
+The **`00_unified_passwords.txt`** file is a comprehensive wordlist that combines all base words and usernames into a single, sorted, and deduplicated file. This is the most convenient file for direct password attacks.
+
+**What it includes:**
+- Base words from `00_real_bases.txt` (extracted from potfile passwords)
+- Enhanced bases from `00_trie_bases.txt` (trie-based pattern analysis)
+- Transformation bases from `00_analyzed_bases.txt` (password analysis)
+- All usernames from `usernames.txt` (extracted from hash files)
+
+**Benefits:**
+- Single file for all base words and usernames
+- No duplicates (fully deduplicated)
+- Alphabetically sorted for easy searching
+- Ready to use with Hashcat or any password cracking tool
+
+**Example usage:**
+```bash
+# Direct dictionary attack
+hashcat -m 1000 -a 0 hashes.txt 00_unified_passwords.txt
+
+# With rules
+hashcat -m 1000 -a 0 hashes.txt 00_unified_passwords.txt -r 01_elite.rule
+```
 
 ---
 
