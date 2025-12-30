@@ -183,20 +183,20 @@ def hashcat_append(word: str, max_length: int = 6) -> str:
 # ADVANCED FEATURES: LEET MAPPING
 # =============================================
 # Expanded leet mapping with comprehensive character substitutions
-# Includes lowercase, uppercase, and Unicode characters
+# Only includes single-character, ASCII-safe substitutions for Hashcat compatibility
 LEET_MAP = {
-    'a': ['@', '4', '/\\', 'Δ'],
-    'A': ['@', '4', '/\\', 'Δ'],
-    'e': ['3', '€', '&'],
-    'E': ['3', '€', '&'],
-    'i': ['1', '!', '|', '¡'],
-    'I': ['1', '!', '|', '¡'],
-    'o': ['0', '()'],
-    'O': ['0', '()'],
+    'a': ['@', '4'],
+    'A': ['@', '4'],
+    'e': ['3', '&'],
+    'E': ['3', '&'],
+    'i': ['1', '!', '|'],
+    'I': ['1', '!', '|'],
+    'o': ['0'],
+    'O': ['0'],
     's': ['$', '5', 'z'],
     'S': ['$', '5', 'z'],
-    't': ['7', '+', '†'],
-    'T': ['7', '+', '†'],
+    't': ['7', '+'],
+    'T': ['7', '+'],
     'l': ['1', '|'],
     'L': ['1', '|'],
     'g': ['9', '6'],
@@ -205,26 +205,26 @@ LEET_MAP = {
     'B': ['8', '6'],
     'z': ['2', '5'],
     'Z': ['2', '5'],
-    'h': ['#', '|-|'],
-    'H': ['#', '|-|'],
+    'h': ['#'],
+    'H': ['#'],
     'c': ['(', '<', '{'],
     'C': ['(', '<', '{'],
-    'y': ['¥', 'j'],
-    'Y': ['¥', 'j'],
-    'n': ['|\|', 'И'],
-    'N': ['|\|', 'И'],
-    'x': ['><', '%'],
-    'X': ['><', '%'],
+    'y': ['j'],
+    'Y': ['j'],
+    'n': ['И'],
+    'N': ['И'],
+    'x': ['%'],
+    'X': ['%'],
     'p': ['9'],
     'P': ['9'],
     'q': ['9'],
     'Q': ['9'],
-    'v': ['\\/'],
-    'V': ['\\/'],
-    'w': ['\\/\\/'],
-    'W': ['\\/\\/'],
-    'm': ['|\\/|'],
-    'M': ['|\\/|'],
+    'd': ['6'],
+    'D': ['6'],
+    'f': ['#'],
+    'F': ['#'],
+    'k': ['X'],
+    'K': ['X'],
 }
 
 # Real-world leet pattern dictionary for known transformations
@@ -246,6 +246,16 @@ LEET_PATTERNS = {
     'hacker': ['h@cker', 'hack3r', 'h@ck3r', 'h4cker', 'h4ck3r'],
     'power': ['p0wer', 'pow3r', 'p0w3r'],
     'super': ['sup3r', '5uper', '5up3r'],
+    'dragon': ['dr@gon', 'drag0n', 'dr@g0n'],
+    'monkey': ['m0nkey', 'monk3y', 'm0nk3y'],
+    'football': ['f00tball', 'footb@ll', 'f00tb@ll'],
+    'baseball': ['b@seball', 'baseb@ll', 'b@seb@ll', 'ba5eball'],
+    'letmein': ['l3tmein', 'letme1n', 'l3tme1n'],
+    'trustno': ['tru5tno', 'trust#o', 'tru5t#o'],
+    'charlie': ['ch@rlie', 'charl1e', 'ch@rl1e'],
+    'shadow': ['sh@dow', 'shad0w', 'sh@d0w'],
+    'michael': ['mich@el', 'micha3l', 'mich@3l'],
+    'internet': ['1nternet', 'intern3t', '1ntern3t'],
 }
 
 def generate_leet_rules(word: str, max_substitutions: int = 3) -> List[Tuple[int, str]]:
@@ -473,6 +483,8 @@ class BFSRuleGenerator:
                         queue.append((new_rule, depth + 1))
         
         return scored_rules
+    
+    def generate_append_prepend_combos(self, common_strings: List[str], limit: int = 100) -> List[Tuple[int, str]]:
         """
         Generate BFS-style combinations of prepend and append operations.
         """
@@ -619,6 +631,14 @@ class PasswordRuleMiner:
         # Advanced features
         self.trie = PasswordTrie()
         self.bfs_generator = BFSRuleGenerator(max_depth=3)
+        
+        # Stats tracking for leet transformations
+        self.leet_stats = {
+            'basic_rules': 0,
+            'hybrid_rules': 0,
+            'bfs_leet_rules': 0,
+            'pattern_matches': 0
+        }
         
         # Caching
         cache_dir = self.out / ".listminer_cache"
@@ -1322,10 +1342,15 @@ class PasswordRuleMiner:
         
         leet_count = 0
         hybrid_count = 0
+        pattern_match_count = 0
         
         for word in progress(top_words, desc="Generating leet rules", leave=False):
             # Generate basic leet variants with scoring
             leet_variants = generate_leet_rules(word, max_substitutions=3)
+            
+            # Track pattern matches
+            if word.lower() in LEET_PATTERNS:
+                pattern_match_count += len(LEET_PATTERNS[word.lower()])
             
             for score, rule in leet_variants:
                 # Add base leet rule with frequency-based scoring
@@ -1368,8 +1393,14 @@ class PasswordRuleMiner:
                     self.scored_rules.append((adjusted_score - 300000, f"{rule} d"))
                     hybrid_count += 1
         
+        # Update stats
+        self.leet_stats['basic_rules'] = leet_count
+        self.leet_stats['hybrid_rules'] = hybrid_count
+        self.leet_stats['pattern_matches'] = pattern_match_count
+        
         log.info(f"Generated {leet_count:,} prioritized leet-speak rules")
         log.info(f"Generated {hybrid_count:,} hybrid leet transformation rules")
+        log.info(f"Matched {pattern_match_count:,} real-world leet patterns")
     
     def generate_bfs_complex_rules(self):
         """Generate complex rules using BFS exploration with leet transformations"""
@@ -1401,6 +1432,7 @@ class PasswordRuleMiner:
         
         leet_bfs_rules = self.bfs_generator.generate_leet_bfs_combos(top_base_words, limit=50)
         self.scored_rules.extend(leet_bfs_rules)
+        self.leet_stats['bfs_leet_rules'] = len(leet_bfs_rules)
         log.info(f"Generated {len(leet_bfs_rules):,} leet BFS combination rules")
     
     def generate_trie_based_bases(self):
@@ -1534,8 +1566,16 @@ class PasswordRuleMiner:
         stats = f"""
 Target Analysis Report — {datetime.now():%Y-%m-%d %H:%M}
 Total passwords parsed: {len(self.passwords):,}
+Unique usernames extracted: {len(self.usernames):,}
 Top prefixes: {', '.join(k for k, _ in self.prefix.most_common(15))}
 Top suffixes: {', '.join(k for k, _ in self.suffix.most_common(15))}
+
+Advanced Leet Transformation Statistics:
+- Basic leet rules generated: {self.leet_stats['basic_rules']:,}
+- Hybrid leet rules generated: {self.leet_stats['hybrid_rules']:,}
+- BFS leet exploration rules: {self.leet_stats['bfs_leet_rules']:,}
+- Real-world pattern matches: {self.leet_stats['pattern_matches']:,}
+- Total leet-based rules: {sum([self.leet_stats['basic_rules'], self.leet_stats['hybrid_rules'], self.leet_stats['bfs_leet_rules']]):,}
         """.strip()
         (self.out / "stats.txt").write_text(stats + "\n")
         log.info(f" → stats.txt")
