@@ -1385,6 +1385,26 @@ class PasswordRuleMiner:
         out_file.write_text("\n".join(usernames) + "\n", encoding="utf-8")
         log.info(f" → {out_file.name} ({len(usernames):,} unique usernames)")
     
+    def _read_wordlist_file(self, filename: str) -> Set[str]:
+        """
+        Helper method to read a wordlist file and return a set of words.
+        
+        Args:
+            filename: Name of the file to read (relative to output directory)
+        
+        Returns:
+            Set of words from the file
+        """
+        filepath = self.out / filename
+        words = set()
+        if filepath.exists():
+            with filepath.open("r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    word = line.strip()
+                    if word:
+                        words.add(word)
+        return words
+    
     def generate_unified_password_file(self):
         """
         Combine base words (real_bases, trie_bases, analyzed_bases) and usernames
@@ -1394,48 +1414,21 @@ class PasswordRuleMiner:
         
         unified_words = set()
         
-        # Collect words from 00_real_bases.txt
-        real_bases_file = self.out / "00_real_bases.txt"
-        if real_bases_file.exists():
-            with real_bases_file.open("r", encoding="utf-8", errors="ignore") as f:
-                for line in f:
-                    word = line.strip()
-                    if word:
-                        unified_words.add(word)
-            log.info(f"  → Added {len(unified_words):,} words from 00_real_bases.txt")
+        # File names to combine (in order)
+        source_files = [
+            "00_real_bases.txt",
+            "00_trie_bases.txt",
+            "00_analyzed_bases.txt",
+            "usernames.txt"
+        ]
         
-        # Collect words from 00_trie_bases.txt
-        trie_bases_file = self.out / "00_trie_bases.txt"
-        if trie_bases_file.exists():
+        # Collect words from each source file
+        for filename in source_files:
             before_count = len(unified_words)
-            with trie_bases_file.open("r", encoding="utf-8", errors="ignore") as f:
-                for line in f:
-                    word = line.strip()
-                    if word:
-                        unified_words.add(word)
-            log.info(f"  → Added {len(unified_words) - before_count:,} new words from 00_trie_bases.txt")
-        
-        # Collect words from 00_analyzed_bases.txt
-        analyzed_bases_file = self.out / "00_analyzed_bases.txt"
-        if analyzed_bases_file.exists():
-            before_count = len(unified_words)
-            with analyzed_bases_file.open("r", encoding="utf-8", errors="ignore") as f:
-                for line in f:
-                    word = line.strip()
-                    if word:
-                        unified_words.add(word)
-            log.info(f"  → Added {len(unified_words) - before_count:,} new words from 00_analyzed_bases.txt")
-        
-        # Collect usernames from usernames.txt
-        usernames_file = self.out / "usernames.txt"
-        if usernames_file.exists():
-            before_count = len(unified_words)
-            with usernames_file.open("r", encoding="utf-8", errors="ignore") as f:
-                for line in f:
-                    word = line.strip()
-                    if word:
-                        unified_words.add(word)
-            log.info(f"  → Added {len(unified_words) - before_count:,} new words from usernames.txt")
+            file_words = self._read_wordlist_file(filename)
+            unified_words.update(file_words)
+            new_words = len(unified_words) - before_count
+            log.info(f"  → {filename}: {len(file_words):,} total, {new_words:,} new, {len(unified_words):,} cumulative")
         
         # Sort the unified wordlist
         sorted_unified = sorted(unified_words)
