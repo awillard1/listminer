@@ -11,14 +11,16 @@ Features:
 - Robust logging for every processed file and generation step
 """
 import argparse
+import hashlib
 import logging
+import pickle
 import re
 import signal
 import sys
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from datetime import datetime
 from pathlib import Path
-from typing import List, Iterable, Dict
+from typing import List, Iterable, Dict, Set, Tuple, Optional
 
 # =============================================
 # PROGRESS BAR
@@ -46,6 +48,69 @@ def sigint_handler(signum, frame):
     log.warning("\nInterrupted by user — exiting cleanly")
     sys.exit(0)
 signal.signal(signal.SIGINT, sigint_handler)
+
+# =============================================
+# FILE CACHE
+# =============================================
+class FileCache:
+    """
+    Caching system for processed potfiles and hashfiles.
+    Uses file modification time and size for cache validation.
+    """
+    
+    def __init__(self, cache_dir: Path):
+        self.cache_dir = cache_dir
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.enabled = True
+    
+    def _get_file_key(self, filepath: Path) -> str:
+        """Generate a unique cache key for a file"""
+        stat = filepath.stat()
+        # Use path, size, and mtime for cache key
+        key_str = f"{filepath.resolve()}:{stat.st_size}:{stat.st_mtime}"
+        return hashlib.md5(key_str.encode()).hexdigest()
+    
+    def _get_cache_path(self, filepath: Path, cache_type: str) -> Path:
+        """Get the cache file path for a given file"""
+        key = self._get_file_key(filepath)
+        return self.cache_dir / f"{cache_type}_{key}.pkl"
+    
+    def get(self, filepath: Path, cache_type: str) -> Optional[any]:
+        """Retrieve cached data for a file if valid"""
+        if not self.enabled:
+            return None
+        
+        cache_path = self._get_cache_path(filepath, cache_type)
+        if not cache_path.exists():
+            return None
+        
+        try:
+            with cache_path.open('rb') as f:
+                cached_data = pickle.load(f)
+            log.info(f"  → Using cached data for {filepath.name}")
+            return cached_data
+        except (pickle.PickleError, EOFError, FileNotFoundError):
+            # Cache corrupted or invalid
+            cache_path.unlink(missing_ok=True)
+            return None
+    
+    def set(self, filepath: Path, cache_type: str, data: any):
+        """Store data in cache for a file"""
+        if not self.enabled:
+            return
+        
+        cache_path = self._get_cache_path(filepath, cache_type)
+        try:
+            with cache_path.open('wb') as f:
+                pickle.dump(data, f)
+        except (pickle.PickleError, OSError) as e:
+            log.warning(f"Failed to cache {filepath.name}: {e}")
+    
+    def clear(self):
+        """Clear all cache files"""
+        for cache_file in self.cache_dir.glob("*.pkl"):
+            cache_file.unlink(missing_ok=True)
+        log.info("Cache cleared")
 
 # =============================================
 # Password decoding
@@ -76,21 +141,285 @@ def extract_password_from_wordlist(line: str) -> str:
 # =============================================
 # Hashcat Rule Helpers
 # =============================================
-def hashcat_prepend(word: str, reverse: bool = True) -> str:
-    """Generate Hashcat prepend rule (^ per char), optionally reversed"""
+def is_ascii_safe(text: str) -> bool:
+    """Check if text contains only ASCII characters (safe for Hashcat rules)"""
+    return all(ord(c) < 128 for c in text)
+
+def hashcat_prepend(word: str, reverse: bool = True, max_length: int = 6) -> str:
+    """
+    Generate efficient Hashcat prepend rule using only Hashcat syntax.
+    Uses ^X for each character (reversed order for proper prepending).
+    Limited to max_length characters for practical rule efficiency.
+    """
+    if not is_ascii_safe(word) or len(word) > max_length or len(word) == 0:
+        return None
+    
+    # For single character, use ^X
+    if len(word) == 1:
+        return f"^{word}"
+    
+    # For multiple characters, use individual ^ commands (reversed for correct order)
     if reverse:
         word = word[::-1]
     return " ".join(f"^{c}" for c in word)
 
-def hashcat_append(word: str) -> str:
-    """Generate Hashcat append rule ($ per char)"""
+def hashcat_append(word: str, max_length: int = 6) -> str:
+    """
+    Generate efficient Hashcat append rule using only Hashcat syntax.
+    Uses $X for each character (Hashcat standard).
+    Limited to max_length characters for practical rule efficiency.
+    """
+    if not is_ascii_safe(word) or len(word) > max_length or len(word) == 0:
+        return None
+    
+    # For single character, use $X
+    if len(word) == 1:
+        return f"${word}"
+    
+    # For multiple characters, use individual $ commands
     return " ".join(f"${c}" for c in word)
+
+# =============================================
+# ADVANCED FEATURES: LEET MAPPING
+# =============================================
+LEET_MAP = {
+    'a': ['@', '4'],
+    'e': ['3'],
+    'i': ['1', '!'],
+    'o': ['0'],
+    's': ['$', '5'],
+    't': ['7', '+'],
+    'l': ['1'],
+    'g': ['9'],
+    'b': ['8'],
+}
+
+def generate_leet_rules(word: str, max_substitutions: int = 2) -> List[str]:
+    """
+    Generate leet-speak Hashcat substitution rules for a word.
+    Uses 's' command for character substitution.
+    """
+    rules = []
+    word_lower = word.lower()
+    positions = [(i, c) for i, c in enumerate(word_lower) if c in LEET_MAP]
+    
+    if not positions:
+        return rules
+    
+    # Single substitutions
+    for _, char in positions:
+        for leet_char in LEET_MAP[char]:
+            rule = f"s{char}{leet_char}"
+            rules.append(rule)
+    
+    # Double substitutions (if enough positions)
+    if len(positions) >= 2 and max_substitutions >= 2:
+        for i in range(len(positions)):
+            for j in range(i + 1, min(i + 4, len(positions))):
+                _, char1 = positions[i]
+                _, char2 = positions[j]
+                for leet1 in LEET_MAP[char1]:
+                    for leet2 in LEET_MAP[char2]:
+                        rule = f"s{char1}{leet1} s{char2}{leet2}"
+                        rules.append(rule)
+    
+    return rules
+
+# =============================================
+# ADVANCED FEATURES: BFS RULE GENERATION
+# =============================================
+class BFSRuleGenerator:
+    """
+    Generate complex Hashcat rules using BFS exploration.
+    Combines multiple operations in sequence for comprehensive coverage.
+    """
+    
+    # Basic Hashcat operations (including Hashcat 7+ features)
+    OPERATIONS = [
+        ('l', 'lowercase'),
+        ('u', 'uppercase'),
+        ('c', 'capitalize'),
+        ('C', 'invert capitalize'),
+        ('E', 'title case'),  # Hashcat 7+
+        ('t', 'toggle case'),
+        ('r', 'reverse'),
+        ('d', 'duplicate'),
+        ('{', 'rotate left'),
+        ('}', 'rotate right'),
+    ]
+    
+    def __init__(self, max_depth: int = 3):
+        self.max_depth = max_depth
+        self.rules: Set[str] = set()
+    
+    def generate(self, base_ops: Optional[List[str]] = None) -> List[Tuple[int, str]]:
+        """
+        Generate rules using BFS with scoring.
+        Returns list of (score, rule) tuples.
+        """
+        if base_ops is None:
+            base_ops = [op[0] for op in self.OPERATIONS[:6]]  # First 6 ops
+        
+        scored_rules = []
+        queue = deque([("", 0)])  # (rule, depth)
+        seen = {""}
+        
+        while queue:
+            current_rule, depth = queue.popleft()
+            
+            if depth > 0:
+                # Score based on complexity and depth
+                score = 500_000 // (depth + 1)
+                scored_rules.append((score, current_rule.strip()))
+            
+            if depth >= self.max_depth:
+                continue
+            
+            # Expand with each operation
+            for op in base_ops:
+                new_rule = f"{current_rule} {op}".strip() if current_rule else op
+                if new_rule not in seen:
+                    seen.add(new_rule)
+                    queue.append((new_rule, depth + 1))
+        
+        return scored_rules
+    
+    def generate_append_prepend_combos(self, common_strings: List[str], limit: int = 100) -> List[Tuple[int, str]]:
+        """
+        Generate BFS-style combinations of prepend and append operations.
+        """
+        scored_rules = []
+        
+        for s in common_strings[:limit]:
+            if len(s) < 1 or len(s) > 4:
+                continue
+            
+            # Prepend only
+            prep = hashcat_prepend(s)
+            if not prep:
+                continue
+            scored_rules.append((300_000, prep))
+            
+            # Append only
+            app = hashcat_append(s)
+            if not app:
+                continue
+            scored_rules.append((300_000, app))
+            
+            # Prepend + append same
+            scored_rules.append((250_000, f"{prep} {app}"))
+            
+            # With case operations
+            scored_rules.append((280_000, f"l {app}"))
+            scored_rules.append((275_000, f"c {app}"))
+            scored_rules.append((270_000, f"l {prep}"))
+            scored_rules.append((265_000, f"c {prep}"))
+        
+        return scored_rules
+
+# =============================================
+# ADVANCED FEATURES: TRIE-BASED BASE ANALYSIS
+# =============================================
+class TrieNode:
+    """Node for Trie data structure"""
+    def __init__(self):
+        self.children: Dict[str, 'TrieNode'] = {}
+        self.is_end = False
+        self.frequency = 0
+        self.word = ""
+
+class PasswordTrie:
+    """
+    Trie-based structure for efficient password pattern analysis.
+    Helps identify common base words and patterns in passwords.
+    """
+    
+    def __init__(self):
+        self.root = TrieNode()
+        self.total_words = 0
+    
+    def insert(self, word: str, frequency: int = 1):
+        """Insert a word into the trie with its frequency"""
+        if not word:
+            return
+        
+        node = self.root
+        for char in word:
+            if char not in node.children:
+                node.children[char] = TrieNode()
+            node = node.children[char]
+        
+        node.is_end = True
+        node.frequency += frequency
+        node.word = word
+        self.total_words += frequency
+    
+    def find_common_prefixes(self, min_length: int = 3, min_freq: int = 5) -> List[Tuple[str, int]]:
+        """Find common prefixes that appear frequently"""
+        prefixes = []
+        
+        def dfs(node: TrieNode, prefix: str):
+            # Check children count (branching factor)
+            if len(prefix) >= min_length:
+                child_freq = sum(self._count_words(child) for child in node.children.values())
+                if child_freq >= min_freq:
+                    prefixes.append((prefix, child_freq))
+            
+            for char, child in node.children.items():
+                dfs(child, prefix + char)
+        
+        dfs(self.root, "")
+        return sorted(prefixes, key=lambda x: x[1], reverse=True)
+    
+    def _count_words(self, node: TrieNode) -> int:
+        """Count total words under a node"""
+        count = node.frequency if node.is_end else 0
+        for child in node.children.values():
+            count += self._count_words(child)
+        return count
+    
+    def get_all_words(self, min_freq: int = 1) -> List[Tuple[str, int]]:
+        """Get all complete words from trie with their frequencies"""
+        words = []
+        
+        def dfs(node: TrieNode):
+            if node.is_end and node.frequency >= min_freq:
+                words.append((node.word, node.frequency))
+            
+            for child in node.children.values():
+                dfs(child)
+        
+        dfs(self.root)
+        return sorted(words, key=lambda x: x[1], reverse=True)
+    
+    def extract_base_words(self, passwords: List[str]) -> List[Tuple[str, int]]:
+        """
+        Extract and analyze base words from passwords.
+        Strips common patterns and returns high-quality bases.
+        """
+        word_counter = Counter()
+        
+        for pwd in passwords:
+            # Clean the password - remove numbers, special chars at ends
+            cleaned = re.sub(r'^[^a-zA-Z]+', '', pwd)
+            cleaned = re.sub(r'[^a-zA-Z]+$', '', cleaned)
+            cleaned = re.sub(r'\d{2,}', '', cleaned)  # Remove number sequences
+            
+            # Extract alpha sequences
+            alpha_parts = re.findall(r'[a-zA-Z]{3,}', cleaned)
+            for part in alpha_parts:
+                part_lower = part.lower()
+                if 3 <= len(part_lower) <= 15:
+                    word_counter[part_lower] += 1
+                    self.insert(part_lower, 1)
+        
+        return word_counter.most_common()
 
 # =============================================
 # MAIN CLASS — PASSWORD RULE MINER
 # =============================================
 class PasswordRuleMiner:
-    def __init__(self, output_dir: Path):
+    def __init__(self, output_dir: Path, use_cache: bool = True):
         self.out = output_dir
         self.out.mkdir(parents=True, exist_ok=True)
         self.scored_rules = []
@@ -98,6 +427,15 @@ class PasswordRuleMiner:
         self.prefix = Counter()
         self.suffix = Counter()
         self.usernames: Dict[str, List[str]] = defaultdict(list)
+        
+        # Advanced features
+        self.trie = PasswordTrie()
+        self.bfs_generator = BFSRuleGenerator(max_depth=3)
+        
+        # Caching
+        cache_dir = self.out / ".listminer_cache"
+        self.cache = FileCache(cache_dir)
+        self.cache.enabled = use_cache
 
         # ======= Fix: Compile the USER_PATTERNS =======
         self.COMPILED_USER_RE = [re.compile(p) for p in self.USER_PATTERNS]
@@ -123,21 +461,37 @@ class PasswordRuleMiner:
                 total += self._parse_potfile(fpath)
         log.info(f"Collected {total:,} plaintext passwords from potfiles.")
 
-        # Build prefix/suffix counters
+        # Build prefix/suffix counters (max 6 chars, never full password)
         for pwd in self.passwords:
-            n = min(6, len(pwd))
-            for i in range(1, n + 1):
+            pwd_len = len(pwd)
+            # Extract prefixes and suffixes, but never the full password
+            # Maximum of 6 characters
+            max_extract = min(6, pwd_len - 1) if pwd_len > 1 else 0
+            for i in range(1, max_extract + 1):
                 self.prefix[pwd[:i]] += 1
                 self.suffix[pwd[-i:]] += 1
 
     def _parse_potfile(self, path: Path) -> int:
+        # Check cache first
+        cached_data = self.cache.get(path, "potfile")
+        if cached_data is not None:
+            passwords, count = cached_data
+            self.passwords.extend(passwords)
+            return count
+        
+        # Parse file
         count = 0
+        passwords = []
         with path.open("r", encoding="utf-8", errors="ignore") as f:
             for line in progress(f, desc=path.stem[:30], leave=False):
                 pwd = extract_password_from_pot(line)
                 if pwd and len(pwd) >= 1:
-                    self.passwords.append(pwd)
+                    passwords.append(pwd)
                     count += 1
+        
+        # Store in cache
+        self.cache.set(path, "potfile", (passwords, count))
+        self.passwords.extend(passwords)
         return count
 
     def mine_hashfiles(self, files: Iterable[Path]):
@@ -185,7 +539,17 @@ class PasswordRuleMiner:
     # File parsing — updated _parse_hashfile
     # =============================================
     def _parse_hashfile(self, path: Path) -> int:
+        # Check cache first
+        cached_data = self.cache.get(path, "hashfile")
+        if cached_data is not None:
+            usernames_dict, count = cached_data
+            for username in usernames_dict:
+                self.usernames[username].append("")
+            return count
+        
+        # Parse file
         count = 0
+        usernames_dict = {}
         with path.open("r", encoding="utf-8", errors="ignore") as f:
             for line in progress(f, desc=path.stem[:30], leave=False):
                 line = line.strip()
@@ -228,9 +592,12 @@ class PasswordRuleMiner:
                     continue
 
                 # Store the username
+                usernames_dict[username] = True
                 self.usernames[username].append("")
                 count += 1
-
+        
+        # Store in cache
+        self.cache.set(path, "hashfile", (usernames_dict, count))
         return count
 
     # -------------------------------
@@ -244,18 +611,31 @@ class PasswordRuleMiner:
             # Split DOMAIN\USER or email-style usernames
             parts = re.split(r'[\.\-\_\s@\\]+', username)
             for part in parts:
-                if len(part) < 3:
+                # Limit to reasonable username length (3-10 chars)
+                if len(part) < 3 or len(part) > 10:
                     continue
+                
+                # Skip non-ASCII usernames
+                if not is_ascii_safe(part):
+                    continue
+                    
                 low = part.lower()
                 cap = part.capitalize()
 
-                # Prepend username (reversed)
-                self.scored_rules.append((10_000_000, hashcat_prepend(low)))
-                self.scored_rules.append((9_900_000, hashcat_prepend(cap)))
-
-                # Append username (normal order)
-                self.scored_rules.append((9_900_000, hashcat_append(low)))
-                self.scored_rules.append((9_800_000, hashcat_append(cap)))
+                # Prepend username (reversed) - max 6 chars enforced in hashcat_prepend
+                prep_low = hashcat_prepend(low)
+                prep_cap = hashcat_prepend(cap)
+                app_low = hashcat_append(low)
+                app_cap = hashcat_append(cap)
+                
+                if prep_low:
+                    self.scored_rules.append((10_000_000, prep_low))
+                if prep_cap:
+                    self.scored_rules.append((9_900_000, prep_cap))
+                if app_low:
+                    self.scored_rules.append((9_900_000, app_low))
+                if app_cap:
+                    self.scored_rules.append((9_800_000, app_cap))
 
                 context_count += 1
 
@@ -266,11 +646,11 @@ class PasswordRuleMiner:
 
         counter = Counter()
         for pwd in self.passwords:
-            pwd = pwd.lower()
-            # Remove years, special chars, trailing numbers
-            pwd = re.sub(r'(202[0-9]|19[0-9]{2}|[!@#$%^&*]+|[0-9]{3,}$)', '', pwd, flags=re.I)
-            if re.fullmatch(r'[a-z]{4,}', pwd):
-                counter[pwd] += 1
+            # Try multiple extraction strategies
+            bases = self._extract_simple_bases(pwd)
+            for base in bases:
+                if len(base) >= 4:
+                    counter[base] += 1
 
         # Keep top_n most common
         top_bases = [word for word, _ in counter.most_common(top_n)]
@@ -279,30 +659,437 @@ class PasswordRuleMiner:
         out_file.write_text("\n".join(top_bases) + "\n", encoding="utf-8")
         log.info(f" → 00_real_bases.txt ({len(top_bases):,} bases)")
     
+    def _extract_simple_bases(self, password: str) -> List[str]:
+        """
+        Extract base words from a password using multiple simple strategies.
+        Returns a list of potential base words.
+        """
+        bases = []
+        
+        # Strategy 1: Unleet and extract alphabetic sequences
+        unleeted = self._unleet_string(password).lower()
+        
+        # Extract all alphabetic sequences of 4+ characters
+        for match in re.finditer(r'[a-z]{4,}', unleeted):
+            base = match.group()
+            # Skip if it's mostly consonants (likely not a word)
+            vowels = sum(1 for c in base if c in 'aeiouy')
+            if vowels >= len(base) * 0.2:  # At least 20% vowels
+                bases.append(base)
+        
+        # Strategy 2: Remove all non-alphabetic and extract longest sequences
+        # First unleet the password
+        unleeted_pwd = self._unleet_string(password)
+        # Remove all numbers and special chars
+        cleaned = re.sub(r'[^a-zA-Z]+', '', unleeted_pwd)
+        if len(cleaned) >= 4:
+            bases.append(cleaned.lower())
+        
+        # Strategy 3: Strip edges and extract core
+        # Remove leading/trailing non-alpha
+        stripped = re.sub(r'^[^a-zA-Z]+|[^a-zA-Z]+$', '', password)
+        if stripped:
+            # Unleet it
+            unleeted_stripped = self._unleet_string(stripped)
+            # Remove any remaining non-alpha from middle
+            cleaned_stripped = re.sub(r'[^a-zA-Z]+', '', unleeted_stripped)
+            if len(cleaned_stripped) >= 4:
+                bases.append(cleaned_stripped.lower())
+        
+        # Strategy 4: Extract word-like patterns (sequences with vowels)
+        # Find all alphabetic sequences in the unleeted password
+        all_alpha_sequences = re.findall(r'[a-z]{4,}', unleeted)
+        for seq in all_alpha_sequences:
+            # Check if it looks like a real word (has vowels)
+            vowels = sum(1 for c in seq if c in 'aeiouy')
+            if vowels >= 2 or vowels >= len(seq) * 0.25:
+                bases.append(seq)
+        
+        # Remove duplicates and sort by length (longest first)
+        unique_bases = list(dict.fromkeys(bases))
+        # Filter out bases that are substrings of longer bases
+        filtered_bases = []
+        for base in sorted(unique_bases, key=len, reverse=True):
+            # Check if this base is a substring of any already added base
+            if not any(base in existing and base != existing for existing in filtered_bases):
+                filtered_bases.append(base)
+        
+        return filtered_bases
+    
+    def _unleet_char(self, char: str) -> str:
+        """Convert a leet character back to its original form"""
+        leet_reverse = {
+            '@': 'a', '4': 'a',
+            '3': 'e',
+            '1': 'i', '!': 'i',
+            '0': 'o',
+            '$': 's', '5': 's',
+            '7': 't', '+': 't',
+            '9': 'g',
+            '8': 'b'
+        }
+        return leet_reverse.get(char, char)
+    
+    def _unleet_string(self, text: str) -> str:
+        """
+        Convert a leet-speak string back to normal text.
+        Only unleets characters that are clearly leet (special chars and single digits within letters).
+        """
+        result = []
+        for i, char in enumerate(text):
+            # Check if this is a leet character
+            if char in '@!$+':
+                # Always unleet special chars
+                result.append(self._unleet_char(char))
+            elif char in '0134578' and i > 0 and i < len(text) - 1:
+                # Only unleet digits if they're surrounded by letters (leet within word)
+                prev_is_alpha = i > 0 and text[i-1].isalpha()
+                next_is_alpha = i < len(text) - 1 and text[i+1].isalpha()
+                if prev_is_alpha or next_is_alpha:
+                    result.append(self._unleet_char(char))
+                else:
+                    result.append(char)
+            else:
+                result.append(char)
+        return ''.join(result)
+    
+    def _extract_base_candidates(self, password: str) -> List[Tuple[str, int, int]]:
+        """
+        Extract all possible base word candidates from a password.
+        Returns list of (base_word, start_pos, end_pos) tuples.
+        """
+        candidates = []
+        
+        # Strategy 1: Unleet the password first
+        unleeted = self._unleet_string(password)
+        
+        # Strategy 2: Check for duplicated words (e.g., "passwordpassword")
+        pwd_len = len(password)
+        # Try splitting at different points to see if it's a duplication
+        for split_point in range(pwd_len // 2, min(pwd_len, pwd_len // 2 + 2)):
+            first_half = password[:split_point]
+            second_half = password[split_point:]
+            
+            # Check if they're the same (case-insensitive)
+            if first_half.lower() == second_half.lower() and len(first_half) >= 4:
+                candidates.append((first_half.lower(), 0, split_point))
+            
+            # Check if unleeted versions are the same
+            first_unleeted = self._unleet_string(first_half)
+            second_unleeted = self._unleet_string(second_half)
+            if first_unleeted.lower() == second_unleeted.lower() and len(first_unleeted) >= 4:
+                candidates.append((first_unleeted.lower(), 0, len(first_unleeted)))
+        
+        # Strategy 3: Find all alphabetic sequences (length 4+)
+        for match in re.finditer(r'[a-zA-Z]{4,}', unleeted):
+            base = match.group().lower()
+            candidates.append((base, match.start(), match.end()))
+        
+        # Strategy 4: Try removing common suffixes/prefixes
+        # Remove trailing numbers and special chars
+        cleaned = re.sub(r'[0-9!@#$%^&*()_+=\-\[\]{}|;:,.<>?/~`]+$', '', unleeted)
+        if len(cleaned) >= 4 and cleaned.isalpha():
+            candidates.append((cleaned.lower(), 0, len(cleaned)))
+        
+        # Remove leading numbers and special chars
+        cleaned = re.sub(r'^[0-9!@#$%^&*()_+=\-\[\]{}|;:,.<>?/~`]+', '', unleeted)
+        if len(cleaned) >= 4 and cleaned.isalpha():
+            start = len(unleeted) - len(cleaned)
+            candidates.append((cleaned.lower(), start, len(unleeted)))
+        
+        # Remove both leading and trailing non-alpha
+        cleaned = re.sub(r'^[^a-zA-Z]+|[^a-zA-Z]+$', '', unleeted)
+        if len(cleaned) >= 4 and cleaned.isalpha():
+            candidates.append((cleaned.lower(), -1, -1))
+        
+        # Strategy 5: Split on common separators and take longest part
+        parts = re.split(r'[0-9!@#$%^&*()_+=\-\[\]{}|;:,.<>?/~`]+', unleeted)
+        for part in parts:
+            if len(part) >= 4 and part.isalpha():
+                candidates.append((part.lower(), -1, -1))  # Position unknown
+        
+        # Strategy 6: Try to identify compound words (e.g., "PasswordManager")
+        # Find sequences with capital letters
+        for match in re.finditer(r'[A-Z][a-z]+', password):
+            word = match.group().lower()
+            if len(word) >= 4:
+                candidates.append((word, match.start(), match.end()))
+        
+        # Strategy 7: Look for repeated patterns within the password
+        # Check if the password contains the same word twice with slight variations
+        for i in range(4, len(unleeted) // 2 + 1):
+            pattern = unleeted[:i]
+            if len(pattern) >= 4 and pattern.lower() in unleeted[i:].lower():
+                candidates.append((pattern.lower(), 0, i))
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_candidates = []
+        for base, start, end in candidates:
+            if base not in seen and len(base) >= 4:
+                seen.add(base)
+                unique_candidates.append((base, start, end))
+        
+        # Sort by length (longest first) - longer bases are usually better
+        unique_candidates.sort(key=lambda x: len(x[0]), reverse=True)
+        
+        return unique_candidates
+    
+    def analyze_password_transformations(self):
+        """
+        Comprehensive password analysis to identify base words and rules.
+        Uses multiple strategies to find the best base word candidates.
+        Optimized for speed with early termination and efficient algorithms.
+        """
+        log.info("Performing comprehensive password transformation analysis...")
+        
+        base_to_rules = defaultdict(Counter)  # base -> Counter of rules
+        identified_bases = Counter()
+        password_to_base = {}  # Track which base was used for each password
+        
+        analyzed_count = 0
+        skipped_count = 0
+        
+        # Process all passwords (no limits)
+        for pwd in progress(self.passwords, desc="Analyzing passwords", leave=False):
+            # Skip very short passwords (quick check)
+            if len(pwd) < 4:
+                skipped_count += 1
+                continue
+            
+            # Get all possible base candidates (optimized extraction)
+            candidates = self._extract_base_candidates(pwd)
+            
+            if not candidates:
+                skipped_count += 1
+                continue
+            
+            # Try each candidate and pick the best one (early termination on first good match)
+            best_base = None
+            best_rules = None
+            best_score = 0
+            
+            # Only try top 3 candidates for speed (most relevant ones)
+            for base_candidate, start, end in candidates[:3]:
+                rules = self._infer_comprehensive_rules(base_candidate, pwd, start, end)
+                
+                if rules:
+                    # Score based on base length and rule simplicity
+                    score = len(base_candidate) * 100 - rules.count(' ') * 2
+                    
+                    if score > best_score:
+                        best_base = base_candidate
+                        best_rules = rules
+                        best_score = score
+                        
+                        # Early termination: if we find a good match (long base, simple rules), stop
+                        if len(base_candidate) >= 6 and rules.count(' ') <= 10:
+                            break
+                    
+                    if score > best_score:
+                        best_base = base_candidate
+                        best_rules = rules
+                        best_score = score
+            
+            if best_base and best_rules:
+                identified_bases[best_base] += 1
+                base_to_rules[best_base][best_rules] += 1
+                password_to_base[pwd] = (best_base, best_rules)
+                analyzed_count += 1
+        
+        log.info(f"Successfully analyzed {analyzed_count:,} passwords")
+        log.info(f"Identified {len(identified_bases):,} unique base words")
+        log.info(f"Skipped {skipped_count:,} passwords (too short or no base found)")
+        
+        # Write base words to a file
+        base_file = self.out / "00_analyzed_bases.txt"
+        sorted_bases = [base for base, _ in identified_bases.most_common()]
+        base_file.write_text("\n".join(sorted_bases) + "\n", encoding="utf-8")
+        log.info(f" → 00_analyzed_bases.txt ({len(sorted_bases):,} bases)")
+        
+        # Generate rules based on the most common transformations
+        rule_count = 0
+        for base, rule_counter in sorted(base_to_rules.items(), key=lambda x: sum(x[1].values()), reverse=True):
+            # Get the most common rules for this base
+            for rule, count in rule_counter.most_common(3):  # Top 3 rules per base
+                if count >= 2:  # Only include if seen at least twice
+                    # Score based on frequency and base popularity
+                    score = count * 100000 + identified_bases[base] * 1000
+                    self.scored_rules.append((score, rule))
+                    rule_count += 1
+        
+        log.info(f"Generated {rule_count:,} transformation-based rules from analysis")
+    
+    def _infer_comprehensive_rules(self, base: str, password: str, start_hint: int = -1, end_hint: int = -1) -> str:
+        """
+        Comprehensive rule inference that handles:
+        - Leet-speak substitutions
+        - Case transformations
+        - Prefix/suffix additions
+        - Duplication (d command)
+        - Position-based insertions
+        """
+        rules = []
+        
+        # Check for duplication pattern first
+        base_lower = base.lower()
+        pwd_lower = password.lower()
+        unleeted_pwd = self._unleet_string(password).lower()
+        
+        # Check if password is a duplicate of the base
+        pwd_len = len(password)
+        base_len = len(base)
+        
+        # Pattern 1: Exact duplicate (e.g., "passwordpassword")
+        if pwd_len == base_len * 2:
+            first_half = password[:base_len]
+            second_half = password[base_len:]
+            
+            # Check if both halves match the base (with case/leet variations)
+            first_unleeted = self._unleet_string(first_half).lower()
+            second_unleeted = self._unleet_string(second_half).lower()
+            
+            if first_unleeted == base_lower and second_unleeted == base_lower:
+                # It's a duplication! Build the rule
+                # Apply case to first half
+                if first_half.islower():
+                    rules.append('l')
+                elif first_half.isupper():
+                    rules.append('u')
+                elif first_half[0].isupper() and first_half[1:].islower():
+                    rules.append('c')
+                
+                # Apply leet to first half
+                for i, (base_char, pwd_char) in enumerate(zip(base_lower, first_half.lower())):
+                    unleeted_char = self._unleet_char(pwd_char)
+                    if base_char == unleeted_char and base_char != pwd_char:
+                        rules.append(f's{base_char}{pwd_char}')
+                
+                # Duplicate
+                rules.append('d')
+                
+                # Check if second half needs different case
+                if second_half != first_half:
+                    # Second half has different case - might need toggle or other transformation
+                    # For simplicity, we'll skip complex duplication rules
+                    if second_half[0].isupper() and first_half[0].islower():
+                        # Can't easily represent this, skip
+                        return ""
+                
+                return " ".join(rules) if rules else ""
+        
+        # Pattern 2: Standard password (non-duplicated)
+        # Find where the base appears
+        base_start = -1
+        base_end = -1
+        
+        if start_hint >= 0 and end_hint > start_hint:
+            base_start = start_hint
+            base_end = end_hint
+        elif base_lower in unleeted_pwd:
+            base_start = unleeted_pwd.index(base_lower)
+            base_end = base_start + len(base_lower)
+        else:
+            # Try to find partial match
+            for i in range(len(unleeted_pwd) - len(base_lower) + 1):
+                segment = unleeted_pwd[i:i+len(base_lower)]
+                # Allow for some character differences (for leet that we missed)
+                matches = sum(1 for a, b in zip(segment, base_lower) if a == b)
+                if matches >= len(base_lower) * 0.7:  # 70% match threshold
+                    base_start = i
+                    base_end = i + len(base_lower)
+                    break
+        
+        if base_start == -1:
+            return ""  # Can't find base in password
+        
+        # Extract parts
+        prefix = password[:base_start]
+        base_part = password[base_start:base_end]
+        suffix = password[base_end:]
+        
+        # Complexity check
+        if len(prefix) > 10 or len(suffix) > 10:
+            return ""
+        
+        if prefix and not is_ascii_safe(prefix):
+            return ""
+        if suffix and not is_ascii_safe(suffix):
+            return ""
+        
+        # Build the rule
+        rules = []
+        
+        # Step 1: Prepend prefix (in reverse order)
+        if prefix:
+            for char in reversed(prefix):
+                rules.append(f'^{char}')
+        
+        # Step 2: Case transformation
+        if base_part.islower():
+            rules.append('l')
+        elif base_part.isupper():
+            rules.append('u')
+        elif len(base_part) > 0 and base_part[0].isupper():
+            if len(base_part) == 1 or base_part[1:].islower():
+                rules.append('c')
+            else:
+                # Mixed case - check pattern
+                if sum(1 for c in base_part if c.isupper()) > len(base_part) / 2:
+                    rules.append('t')  # Toggle
+        
+        # Step 3: Leet substitutions (compare actual password chars with base)
+        for i in range(min(len(base_lower), len(base_part))):
+            base_char = base_lower[i]
+            pwd_char = base_part[i].lower()
+            
+            # Check if this is a leet substitution
+            unleeted_char = self._unleet_char(pwd_char)
+            if base_char == unleeted_char and base_char != pwd_char:
+                # This is a leet substitution
+                rules.append(f's{base_char}{pwd_char}')
+        
+        # Step 4: Append suffix
+        if suffix:
+            for char in suffix:
+                rules.append(f'${char}')
+        
+        # Validate rule length
+        if len(rules) > 50:
+            return ""  # Too complex
+        
+        return " ".join(rules)
+    
     def generate_prefix_suffix_rules(self):
         log.info("Generating prefix/suffix rules from potfile passwords...")
         for prefix, count in self.prefix.most_common(2000):
-            if len(prefix) >= 2:
+            if len(prefix) >= 2 and is_ascii_safe(prefix):
                 rule = hashcat_prepend(prefix)
-                score = int(count * (len(prefix) ** 3.6) * 38)
-                self.scored_rules.append((score, rule))
+                if rule:
+                    score = int(count * (len(prefix) ** 3.6) * 38)
+                    self.scored_rules.append((score, rule))
         for suffix, count in self.suffix.most_common(1600):
-            if len(suffix) >= 2:
+            if len(suffix) >= 2 and is_ascii_safe(suffix):
                 rule = hashcat_append(suffix)
-                score = int(count * (len(suffix) ** 3.3) * 32)
-                self.scored_rules.append((score, rule))
+                if rule:
+                    score = int(count * (len(suffix) ** 3.3) * 32)
+                    self.scored_rules.append((score, rule))
 
     def generate_surround_rules(self):
         log.info("Generating surround rules...")
         seen = set()
         for prefix, pc in self.prefix.most_common(500):
-            if not 2 <= len(prefix) <= 5:
+            if not 2 <= len(prefix) <= 5 or not is_ascii_safe(prefix):
                 continue
             pre = hashcat_prepend(prefix)
+            if not pre:
+                continue
             for suffix, sc in self.suffix.most_common(500):
-                if not 2 <= len(suffix) <= 5:
+                if not 2 <= len(suffix) <= 5 or not is_ascii_safe(suffix):
                     continue
                 app = hashcat_append(suffix)
+                if not app:
+                    continue
                 rule = f"{pre} {app}".strip()
                 if rule not in seen:
                     seen.add(rule)
@@ -325,6 +1112,78 @@ class PasswordRuleMiner:
                     (900_000, f"l{app} $!"),
                     (895_000, f"l c{app} $!"),
                 ])
+    
+    def generate_leet_rules(self):
+        """Generate leet-speak mutation rules"""
+        log.info("Generating leet-speak mutation rules...")
+        
+        # Get top base words from passwords
+        base_words = []
+        word_counter = Counter()
+        for pwd in progress(self.passwords, desc="Analyzing for leet", leave=False):
+            # Extract alphabetic base
+            cleaned = re.sub(r'[^a-zA-Z]', '', pwd.lower())
+            if 4 <= len(cleaned) <= 12:
+                word_counter[cleaned] += 1
+        
+        # Get top 500 words for leet generation
+        top_words = [word for word, _ in word_counter.most_common(500)]
+        
+        leet_count = 0
+        for word in progress(top_words, desc="Generating leet rules", leave=False):
+            leet_variants = generate_leet_rules(word, max_substitutions=2)
+            for rule in leet_variants:
+                # Score based on word frequency and rule complexity
+                freq = word_counter[word]
+                score = int(freq * 5000)
+                self.scored_rules.append((score, rule))
+                leet_count += 1
+        
+        log.info(f"Generated {leet_count:,} leet-speak mutation rules")
+    
+    def generate_bfs_complex_rules(self):
+        """Generate complex rules using BFS exploration"""
+        log.info("Generating BFS-based complex rules...")
+        
+        # Generate basic BFS rules
+        bfs_rules = self.bfs_generator.generate()
+        self.scored_rules.extend(bfs_rules)
+        log.info(f"Generated {len(bfs_rules):,} BFS exploration rules")
+        
+        # Generate BFS combinations with common strings (ASCII only)
+        common_strings = [s for s, _ in self.suffix.most_common(50) if is_ascii_safe(s)]
+        common_strings.extend([p for p, _ in self.prefix.most_common(50) if is_ascii_safe(p)])
+        
+        combo_rules = self.bfs_generator.generate_append_prepend_combos(common_strings, limit=50)
+        self.scored_rules.extend(combo_rules)
+        log.info(f"Generated {len(combo_rules):,} BFS combination rules")
+    
+    def generate_trie_based_bases(self):
+        """Generate enhanced base wordlist using trie analysis"""
+        log.info("Generating trie-based base word analysis...")
+        
+        # Extract base words using trie
+        trie_bases = self.trie.extract_base_words(self.passwords)
+        
+        # Get high-quality words
+        quality_bases = []
+        for word, freq in trie_bases:
+            if freq >= 2 and 4 <= len(word) <= 15:
+                quality_bases.append((word, freq))
+        
+        # Also find common prefixes for pattern analysis
+        common_prefixes = self.trie.find_common_prefixes(min_length=3, min_freq=10)
+        
+        log.info(f"Trie analysis found {len(quality_bases):,} quality base words")
+        log.info(f"Identified {len(common_prefixes):,} common prefixes")
+        
+        # Write enhanced base file
+        out_file = self.out / "00_trie_bases.txt"
+        bases_text = "\n".join([word for word, _ in quality_bases[:5_000_000]])
+        out_file.write_text(bases_text + "\n", encoding="utf-8")
+        log.info(f" → 00_trie_bases.txt ({len(quality_bases[:5_000_000]):,} bases)")
+        
+        return quality_bases, common_prefixes
     def write_username_wordlist(self):
         """
         Write a wordlist of unique usernames to a file.
@@ -403,14 +1262,29 @@ Top suffixes: {', '.join(k for k, _ in self.suffix.most_common(15))}
     # Full artifact generation
     # -------------------------------
     def generate_all_artifacts(self):
+        log.info("Phase 2/3: Generating artifacts with advanced features...")
+        
+        # Original features
         self.generate_real_bases()
         self.generate_user_context_rules()
         self.write_username_wordlist() 
         self.generate_prefix_suffix_rules()
         self.generate_surround_rules()
         self.generate_static_and_year_rules()
+        
+        # Advanced features
+        self.generate_leet_rules()
+        self.generate_bfs_complex_rules()
+        self.generate_trie_based_bases()
+        
+        # NEW: Comprehensive password analysis
+        self.analyze_password_transformations()
+        
+        # Write outputs
         self.write_rules()
         self.generate_masks_and_years()
+        
+        log.info("Phase 3/3: All artifacts generated successfully!")
         log.info(f"\nALL DONE! → {self.out.resolve()}")
 
 # =============================================
@@ -431,7 +1305,16 @@ def main():
     parser.add_argument("-p", "--pot", nargs="+", required=True, help="Potfile(s) or directory of potfiles")
     parser.add_argument("-hf", "--hashfile", nargs="*", help="Hashfile(s) or directory of hash files")
     parser.add_argument("-o", "--output", type=Path, default=Path("listminer"), help="Output directory")
+    parser.add_argument("--no-cache", action="store_true", help="Disable caching of processed files")
+    parser.add_argument("--clear-cache", action="store_true", help="Clear cache and exit")
     args = parser.parse_args()
+    
+    # Handle cache clearing
+    if args.clear_cache:
+        cache_dir = args.output / ".listminer_cache"
+        cache = FileCache(cache_dir)
+        cache.clear()
+        return
 
     pot_files = find_files(args.pot)
     if not pot_files:
@@ -440,7 +1323,11 @@ def main():
 
     hash_files = find_files(args.hashfile) if args.hashfile else []
 
-    miner = PasswordRuleMiner(args.output)
+    use_cache = not args.no_cache
+    if use_cache:
+        log.info("File caching enabled (use --no-cache to disable)")
+    
+    miner = PasswordRuleMiner(args.output, use_cache=use_cache)
     miner.mine_potfiles(pot_files)
     if hash_files:
         miner.mine_hashfiles(hash_files)
