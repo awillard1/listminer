@@ -149,6 +149,31 @@ All artifacts are written to the specified output directory.
 | `05_years_seasons.rule`     | Year and season mutation rules                                       |
 | `stats.txt`                 | Summary of total passwords, prefixes, and suffixes                   |
 
+### Unified Password File
+
+The **`00_unified_passwords.txt`** file is a comprehensive wordlist that combines all base words and usernames into a single, sorted, and deduplicated file. This is the most convenient file for direct password attacks.
+
+**What it includes:**
+- Base words from `00_real_bases.txt` (extracted from potfile passwords)
+- Enhanced bases from `00_trie_bases.txt` (trie-based pattern analysis)
+- Transformation bases from `00_analyzed_bases.txt` (password analysis)
+- All usernames from `usernames.txt` (extracted from hash files)
+
+**Benefits:**
+- Single file for all base words and usernames
+- No duplicates (fully deduplicated)
+- Alphabetically sorted for easy searching
+- Ready to use with Hashcat or any password cracking tool
+
+**Example usage:**
+```bash
+# Direct dictionary attack
+hashcat -m 1000 -a 0 hashes.txt 00_unified_passwords.txt
+
+# With rules
+hashcat -m 1000 -a 0 hashes.txt 00_unified_passwords.txt -r 01_elite.rule
+```
+
 ---
 
 ## Internal Workflow
