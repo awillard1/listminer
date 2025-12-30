@@ -141,14 +141,22 @@ def extract_password_from_wordlist(line: str) -> str:
 # =============================================
 # Hashcat Rule Helpers
 # =============================================
+def is_ascii_safe(text: str) -> bool:
+    """Check if text contains only ASCII characters (safe for Hashcat rules)"""
+    return all(ord(c) < 128 for c in text)
+
 def hashcat_prepend(word: str, reverse: bool = True) -> str:
     """Generate Hashcat prepend rule (^ per char), optionally reversed"""
+    if not is_ascii_safe(word):
+        return None
     if reverse:
         word = word[::-1]
     return " ".join(f"^{c}" for c in word)
 
 def hashcat_append(word: str) -> str:
     """Generate Hashcat append rule ($ per char)"""
+    if not is_ascii_safe(word):
+        return None
     return " ".join(f"${c}" for c in word)
 
 # =============================================
@@ -267,10 +275,14 @@ class BFSRuleGenerator:
             
             # Prepend only
             prep = hashcat_prepend(s)
+            if not prep:
+                continue
             scored_rules.append((300_000, prep))
             
             # Append only
             app = hashcat_append(s)
+            if not app:
+                continue
             scored_rules.append((300_000, app))
             
             # Prepend + append same
@@ -577,16 +589,28 @@ class PasswordRuleMiner:
             for part in parts:
                 if len(part) < 3:
                     continue
+                
+                # Skip non-ASCII usernames
+                if not is_ascii_safe(part):
+                    continue
+                    
                 low = part.lower()
                 cap = part.capitalize()
 
                 # Prepend username (reversed)
-                self.scored_rules.append((10_000_000, hashcat_prepend(low)))
-                self.scored_rules.append((9_900_000, hashcat_prepend(cap)))
-
-                # Append username (normal order)
-                self.scored_rules.append((9_900_000, hashcat_append(low)))
-                self.scored_rules.append((9_800_000, hashcat_append(cap)))
+                prep_low = hashcat_prepend(low)
+                prep_cap = hashcat_prepend(cap)
+                app_low = hashcat_append(low)
+                app_cap = hashcat_append(cap)
+                
+                if prep_low:
+                    self.scored_rules.append((10_000_000, prep_low))
+                if prep_cap:
+                    self.scored_rules.append((9_900_000, prep_cap))
+                if app_low:
+                    self.scored_rules.append((9_900_000, app_low))
+                if app_cap:
+                    self.scored_rules.append((9_800_000, app_cap))
 
                 context_count += 1
 
@@ -613,27 +637,33 @@ class PasswordRuleMiner:
     def generate_prefix_suffix_rules(self):
         log.info("Generating prefix/suffix rules from potfile passwords...")
         for prefix, count in self.prefix.most_common(2000):
-            if len(prefix) >= 2:
+            if len(prefix) >= 2 and is_ascii_safe(prefix):
                 rule = hashcat_prepend(prefix)
-                score = int(count * (len(prefix) ** 3.6) * 38)
-                self.scored_rules.append((score, rule))
+                if rule:
+                    score = int(count * (len(prefix) ** 3.6) * 38)
+                    self.scored_rules.append((score, rule))
         for suffix, count in self.suffix.most_common(1600):
-            if len(suffix) >= 2:
+            if len(suffix) >= 2 and is_ascii_safe(suffix):
                 rule = hashcat_append(suffix)
-                score = int(count * (len(suffix) ** 3.3) * 32)
-                self.scored_rules.append((score, rule))
+                if rule:
+                    score = int(count * (len(suffix) ** 3.3) * 32)
+                    self.scored_rules.append((score, rule))
 
     def generate_surround_rules(self):
         log.info("Generating surround rules...")
         seen = set()
         for prefix, pc in self.prefix.most_common(500):
-            if not 2 <= len(prefix) <= 5:
+            if not 2 <= len(prefix) <= 5 or not is_ascii_safe(prefix):
                 continue
             pre = hashcat_prepend(prefix)
+            if not pre:
+                continue
             for suffix, sc in self.suffix.most_common(500):
-                if not 2 <= len(suffix) <= 5:
+                if not 2 <= len(suffix) <= 5 or not is_ascii_safe(suffix):
                     continue
                 app = hashcat_append(suffix)
+                if not app:
+                    continue
                 rule = f"{pre} {app}".strip()
                 if rule not in seen:
                     seen.add(rule)
@@ -694,9 +724,9 @@ class PasswordRuleMiner:
         self.scored_rules.extend(bfs_rules)
         log.info(f"Generated {len(bfs_rules):,} BFS exploration rules")
         
-        # Generate BFS combinations with common strings
-        common_strings = [s for s, _ in self.suffix.most_common(50)]
-        common_strings.extend([p for p, _ in self.prefix.most_common(50)])
+        # Generate BFS combinations with common strings (ASCII only)
+        common_strings = [s for s, _ in self.suffix.most_common(50) if is_ascii_safe(s)]
+        common_strings.extend([p for p, _ in self.prefix.most_common(50) if is_ascii_safe(p)])
         
         combo_rules = self.bfs_generator.generate_append_prepend_combos(common_strings, limit=50)
         self.scored_rules.extend(combo_rules)
