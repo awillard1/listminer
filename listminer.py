@@ -13,13 +13,16 @@ Features:
 import argparse
 import hashlib
 import logging
+import os
 import pickle
 import re
 import signal
 import sys
 from collections import Counter, defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
+from threading import Lock
 from typing import List, Iterable, Dict, Set, Tuple, Optional
 
 # =============================================
@@ -35,6 +38,24 @@ def progress(it, **kw):
     return _tqdm(it, **kw) if TQDM and sys.stdout.isatty() else it
 
 # =============================================
+# PARALLEL PROCESSING CONFIGURATION
+# =============================================
+# Fallback CPU count when os.cpu_count() returns None (unknown system)
+FALLBACK_CPU_COUNT = 4
+
+# Determine optimal worker count (CPU count or environment variable)
+DEFAULT_WORKERS = min(8, (os.cpu_count() or FALLBACK_CPU_COUNT))
+MAX_WORKERS = int(os.environ.get('LISTMINER_MAX_WORKERS', DEFAULT_WORKERS))
+
+# Batch multiplier for load balancing across workers
+# Higher values create more batches for better distribution and progress tracking
+BATCH_MULTIPLIER = 4
+
+# Minimum batch sizes for different operation types
+MIN_PASSWORD_BATCH_SIZE = 1000  # For password processing operations
+MIN_WORD_BATCH_SIZE = 10  # For word-level operations (smaller datasets)
+
+# =============================================
 # Logging
 # =============================================
 logging.basicConfig(
@@ -43,6 +64,14 @@ logging.basicConfig(
     datefmt="%H:%M:%S"
 )
 log = logging.getLogger(__name__)
+
+# Thread-safe logging lock for parallel operations
+_log_lock = Lock()
+
+def parallel_log(message: str):
+    """Thread-safe logging for parallel operations"""
+    with _log_lock:
+        log.info(message)
 
 def sigint_handler(signum, frame):
     log.warning("\nInterrupted by user — exiting cleanly")
@@ -392,26 +421,61 @@ class PasswordTrie:
         dfs(self.root)
         return sorted(words, key=lambda x: x[1], reverse=True)
     
-    def extract_base_words(self, passwords: List[str]) -> List[Tuple[str, int]]:
+    def extract_base_words(self, passwords: List[str], max_workers: int = None) -> List[Tuple[str, int]]:
         """
         Extract and analyze base words from passwords.
         Strips common patterns and returns high-quality bases.
+        Now parallelized for improved performance.
         """
-        word_counter = Counter()
+        if max_workers is None:
+            max_workers = MAX_WORKERS
         
-        for pwd in passwords:
-            # Clean the password - remove numbers, special chars at ends
-            cleaned = re.sub(r'^[^a-zA-Z]+', '', pwd)
-            cleaned = re.sub(r'[^a-zA-Z]+$', '', cleaned)
-            cleaned = re.sub(r'\d{2,}', '', cleaned)  # Remove number sequences
+        # Create batches for parallel processing
+        batch_size = PasswordRuleMiner._calculate_batch_size_for_workers(len(passwords), max_workers)
+        password_batches = [
+            passwords[i:i + batch_size]
+            for i in range(0, len(passwords), batch_size)
+        ]
+        
+        def process_batch(batch):
+            """Process a batch of passwords to extract base words"""
+            batch_counter = Counter()
+            for pwd in batch:
+                # Clean the password - remove numbers, special chars at ends
+                cleaned = re.sub(r'^[^a-zA-Z]+', '', pwd)
+                cleaned = re.sub(r'[^a-zA-Z]+$', '', cleaned)
+                cleaned = re.sub(r'\d{2,}', '', cleaned)  # Remove number sequences
+                
+                # Extract alpha sequences
+                alpha_parts = re.findall(r'[a-zA-Z]{3,}', cleaned)
+                for part in alpha_parts:
+                    part_lower = part.lower()
+                    if 3 <= len(part_lower) <= 15:
+                        batch_counter[part_lower] += 1
+            return batch_counter
+        
+        # Process batches in parallel
+        word_counter = Counter()
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(process_batch, batch): idx
+                for idx, batch in enumerate(password_batches)
+            }
             
-            # Extract alpha sequences
-            alpha_parts = re.findall(r'[a-zA-Z]{3,}', cleaned)
-            for part in alpha_parts:
-                part_lower = part.lower()
-                if 3 <= len(part_lower) <= 15:
-                    word_counter[part_lower] += 1
-                    self.insert(part_lower, 1)
+            for future in as_completed(futures):
+                batch_idx = futures[future]
+                try:
+                    batch_counter = future.result()
+                    word_counter.update(batch_counter)
+                    # Insert into trie sequentially for thread safety
+                    # Note: Trie insertion is done here rather than in parallel workers
+                    # to avoid the complexity and overhead of thread-safe trie operations.
+                    # This sequential insertion is fast enough since it's just updating
+                    # the already-computed word counts.
+                    for word, count in batch_counter.items():
+                        self.insert(word, count)
+                except Exception as e:
+                    parallel_log(f"Error processing trie batch {batch_idx}: {e}")
         
         return word_counter.most_common()
 
@@ -419,7 +483,7 @@ class PasswordTrie:
 # MAIN CLASS — PASSWORD RULE MINER
 # =============================================
 class PasswordRuleMiner:
-    def __init__(self, output_dir: Path, use_cache: bool = True):
+    def __init__(self, output_dir: Path, use_cache: bool = True, max_workers: int = None):
         self.out = output_dir
         self.out.mkdir(parents=True, exist_ok=True)
         self.scored_rules = []
@@ -436,6 +500,10 @@ class PasswordRuleMiner:
         cache_dir = self.out / ".listminer_cache"
         self.cache = FileCache(cache_dir)
         self.cache.enabled = use_cache
+        
+        # Parallel processing configuration
+        self.max_workers = max_workers if max_workers is not None else MAX_WORKERS
+        self._rules_lock = Lock()  # Thread-safe access to scored_rules
 
         # ======= Fix: Compile the USER_PATTERNS =======
         self.COMPILED_USER_RE = [re.compile(p) for p in self.USER_PATTERNS]
@@ -446,6 +514,28 @@ class PasswordRuleMiner:
     # -------------------------------
     # File parsing
     # -------------------------------
+    @staticmethod
+    def _calculate_batch_size_for_workers(items_count: int, max_workers: int, min_batch_size: int = MIN_PASSWORD_BATCH_SIZE) -> int:
+        """
+        Calculate optimal batch size for parallel processing.
+        Uses BATCH_MULTIPLIER to ensure enough batches for load balancing.
+        Ensures minimum batch size of 1 to prevent division errors.
+        """
+        if items_count == 0:
+            return 1
+        calculated_size = items_count // (max_workers * BATCH_MULTIPLIER)
+        # Return the maximum of 1 and min_batch_size, but use calculated_size if it's larger
+        return max(1, max(min_batch_size if calculated_size < min_batch_size else calculated_size, 1))
+    
+    def _calculate_batch_size(self, items_count: int, min_batch_size: int = MIN_PASSWORD_BATCH_SIZE) -> int:
+        """Calculate optimal batch size for parallel processing using instance workers"""
+        return self._calculate_batch_size_for_workers(items_count, self.max_workers, min_batch_size)
+    
+    def _add_scored_rules(self, rules: List[Tuple[int, str]]):
+        """Thread-safe method to add scored rules"""
+        with self._rules_lock:
+            self.scored_rules.extend(rules)
+    
     def mine_potfiles(self, files: Iterable[Path]):
         total = 0
         log.info("Phase 1/3: Mining potfiles...")
@@ -643,14 +733,44 @@ class PasswordRuleMiner:
         
     def generate_real_bases(self, top_n: int = 2_000_000):
         log.info("Generating 00_real_bases.txt (base words from potfile passwords)...")
+        log.info(f"Using {self.max_workers} parallel workers for base extraction")
 
+        def process_password_batch_for_bases(batch):
+            """Process a batch of passwords to extract bases"""
+            batch_counter = Counter()
+            for pwd in batch:
+                # Try multiple extraction strategies
+                bases = self._extract_simple_bases(pwd)
+                for base in bases:
+                    if len(base) >= 4:
+                        batch_counter[base] += 1
+            return batch_counter
+        
+        # Create batches for parallel processing
+        batch_size = self._calculate_batch_size(len(self.passwords))
+        password_batches = [
+            self.passwords[i:i + batch_size]
+            for i in range(0, len(self.passwords), batch_size)
+        ]
+        
+        parallel_log(f"Processing {len(self.passwords):,} passwords in {len(password_batches)} batches")
+        
         counter = Counter()
-        for pwd in self.passwords:
-            # Try multiple extraction strategies
-            bases = self._extract_simple_bases(pwd)
-            for base in bases:
-                if len(base) >= 4:
-                    counter[base] += 1
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            futures = {
+                executor.submit(process_password_batch_for_bases, batch): idx
+                for idx, batch in enumerate(password_batches)
+            }
+            
+            for future in as_completed(futures):
+                batch_idx = futures[future]
+                try:
+                    batch_counter = future.result()
+                    counter.update(batch_counter)
+                    parallel_log(f"Base extraction batch {batch_idx + 1}/{len(password_batches)} complete: "
+                               f"{len(batch_counter):,} bases found")
+                except Exception as e:
+                    parallel_log(f"Error processing base extraction batch {batch_idx}: {e}")
 
         # Keep top_n most common
         top_bases = [word for word, _ in counter.most_common(top_n)]
@@ -840,8 +960,10 @@ class PasswordRuleMiner:
         Comprehensive password analysis to identify base words and rules.
         Uses multiple strategies to find the best base word candidates.
         Optimized for speed with early termination and efficient algorithms.
+        Now parallelized for improved performance.
         """
         log.info("Performing comprehensive password transformation analysis...")
+        log.info(f"Using {self.max_workers} parallel workers for analysis")
         
         base_to_rules = defaultdict(Counter)  # base -> Counter of rules
         identified_bases = Counter()
@@ -850,52 +972,90 @@ class PasswordRuleMiner:
         analyzed_count = 0
         skipped_count = 0
         
-        # Process all passwords (no limits)
-        for pwd in progress(self.passwords, desc="Analyzing passwords", leave=False):
-            # Skip very short passwords (quick check)
-            if len(pwd) < 4:
-                skipped_count += 1
-                continue
+        # Create batches for parallel processing
+        batch_size = self._calculate_batch_size(len(self.passwords))
+        password_batches = [
+            self.passwords[i:i + batch_size] 
+            for i in range(0, len(self.passwords), batch_size)
+        ]
+        
+        parallel_log(f"Processing {len(self.passwords):,} passwords in {len(password_batches)} batches")
+        
+        def process_password_batch(batch):
+            """Process a batch of passwords and return results"""
+            batch_bases = Counter()
+            batch_base_rules = defaultdict(Counter)
+            batch_pwd_base = {}
+            batch_analyzed = 0
+            batch_skipped = 0
             
-            # Get all possible base candidates (optimized extraction)
-            candidates = self._extract_base_candidates(pwd)
-            
-            if not candidates:
-                skipped_count += 1
-                continue
-            
-            # Try each candidate and pick the best one (early termination on first good match)
-            best_base = None
-            best_rules = None
-            best_score = 0
-            
-            # Only try top 3 candidates for speed (most relevant ones)
-            for base_candidate, start, end in candidates[:3]:
-                rules = self._infer_comprehensive_rules(base_candidate, pwd, start, end)
+            for pwd in batch:
+                # Skip very short passwords (quick check)
+                if len(pwd) < 4:
+                    batch_skipped += 1
+                    continue
                 
-                if rules:
-                    # Score based on base length and rule simplicity
-                    score = len(base_candidate) * 100 - rules.count(' ') * 2
+                # Get all possible base candidates (optimized extraction)
+                candidates = self._extract_base_candidates(pwd)
+                
+                if not candidates:
+                    batch_skipped += 1
+                    continue
+                
+                # Try each candidate and pick the best one (early termination on first good match)
+                best_base = None
+                best_rules = None
+                best_score = 0
+                
+                # Only try top 3 candidates for speed (most relevant ones)
+                for base_candidate, start, end in candidates[:3]:
+                    rules = self._infer_comprehensive_rules(base_candidate, pwd, start, end)
                     
-                    if score > best_score:
-                        best_base = base_candidate
-                        best_rules = rules
-                        best_score = score
+                    if rules:
+                        # Score based on base length and rule simplicity
+                        score = len(base_candidate) * 100 - rules.count(' ') * 2
                         
-                        # Early termination: if we find a good match (long base, simple rules), stop
-                        if len(base_candidate) >= 6 and rules.count(' ') <= 10:
-                            break
-                    
-                    if score > best_score:
-                        best_base = base_candidate
-                        best_rules = rules
-                        best_score = score
+                        if score > best_score:
+                            best_base = base_candidate
+                            best_rules = rules
+                            best_score = score
+                            
+                            # Early termination: if we find a good match (long base, simple rules), stop
+                            if len(base_candidate) >= 6 and rules.count(' ') <= 10:
+                                break
+                
+                if best_base and best_rules:
+                    batch_bases[best_base] += 1
+                    batch_base_rules[best_base][best_rules] += 1
+                    batch_pwd_base[pwd] = (best_base, best_rules)
+                    batch_analyzed += 1
             
-            if best_base and best_rules:
-                identified_bases[best_base] += 1
-                base_to_rules[best_base][best_rules] += 1
-                password_to_base[pwd] = (best_base, best_rules)
-                analyzed_count += 1
+            return batch_bases, batch_base_rules, batch_pwd_base, batch_analyzed, batch_skipped
+        
+        # Process batches in parallel
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            futures = {
+                executor.submit(process_password_batch, batch): idx 
+                for idx, batch in enumerate(password_batches)
+            }
+            
+            for future in as_completed(futures):
+                batch_idx = futures[future]
+                try:
+                    batch_bases, batch_base_rules, batch_pwd_base, batch_analyzed, batch_skipped = future.result()
+                    
+                    # Merge results
+                    identified_bases.update(batch_bases)
+                    for base, rules in batch_base_rules.items():
+                        base_to_rules[base].update(rules)
+                    password_to_base.update(batch_pwd_base)
+                    analyzed_count += batch_analyzed
+                    skipped_count += batch_skipped
+                    
+                    parallel_log(f"Batch {batch_idx + 1}/{len(password_batches)} complete: "
+                               f"{batch_analyzed:,} analyzed, {batch_skipped:,} skipped")
+                except Exception as e:
+                    parallel_log(f"Error processing batch {batch_idx}: {e}")
         
         log.info(f"Successfully analyzed {analyzed_count:,} passwords")
         log.info(f"Identified {len(identified_bases):,} unique base words")
@@ -1114,8 +1274,9 @@ class PasswordRuleMiner:
                 ])
     
     def generate_leet_rules(self):
-        """Generate leet-speak mutation rules"""
+        """Generate leet-speak mutation rules with parallel processing"""
         log.info("Generating leet-speak mutation rules...")
+        log.info(f"Using {self.max_workers} parallel workers for leet rule generation")
         
         # Get top base words from passwords
         base_words = []
@@ -1129,15 +1290,44 @@ class PasswordRuleMiner:
         # Get top 500 words for leet generation
         top_words = [word for word, _ in word_counter.most_common(500)]
         
+        def process_word_batch(words_batch):
+            """Process a batch of words and generate leet rules"""
+            batch_rules = []
+            for word in words_batch:
+                leet_variants = generate_leet_rules(word, max_substitutions=2)
+                for rule in leet_variants:
+                    # Score based on word frequency and rule complexity
+                    freq = word_counter[word]
+                    score = int(freq * 5000)
+                    batch_rules.append((score, rule))
+            return batch_rules
+        
+        # Create batches for parallel processing (smaller batches for word processing)
+        batch_size = self._calculate_batch_size(len(top_words), MIN_WORD_BATCH_SIZE)
+        word_batches = [
+            top_words[i:i + batch_size]
+            for i in range(0, len(top_words), batch_size)
+        ]
+        
+        parallel_log(f"Processing {len(top_words)} words in {len(word_batches)} batches")
+        
         leet_count = 0
-        for word in progress(top_words, desc="Generating leet rules", leave=False):
-            leet_variants = generate_leet_rules(word, max_substitutions=2)
-            for rule in leet_variants:
-                # Score based on word frequency and rule complexity
-                freq = word_counter[word]
-                score = int(freq * 5000)
-                self.scored_rules.append((score, rule))
-                leet_count += 1
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            futures = {
+                executor.submit(process_word_batch, batch): idx
+                for idx, batch in enumerate(word_batches)
+            }
+            
+            for future in as_completed(futures):
+                batch_idx = futures[future]
+                try:
+                    batch_rules = future.result()
+                    self._add_scored_rules(batch_rules)
+                    leet_count += len(batch_rules)
+                    parallel_log(f"Leet batch {batch_idx + 1}/{len(word_batches)} complete: "
+                               f"{len(batch_rules):,} rules generated")
+                except Exception as e:
+                    parallel_log(f"Error processing leet batch {batch_idx}: {e}")
         
         log.info(f"Generated {leet_count:,} leet-speak mutation rules")
     
@@ -1161,9 +1351,10 @@ class PasswordRuleMiner:
     def generate_trie_based_bases(self):
         """Generate enhanced base wordlist using trie analysis"""
         log.info("Generating trie-based base word analysis...")
+        log.info(f"Using {self.max_workers} parallel workers for trie operations")
         
-        # Extract base words using trie
-        trie_bases = self.trie.extract_base_words(self.passwords)
+        # Extract base words using trie with parallel processing
+        trie_bases = self.trie.extract_base_words(self.passwords, max_workers=self.max_workers)
         
         # Get high-quality words
         quality_bases = []
@@ -1307,6 +1498,8 @@ def main():
     parser.add_argument("-o", "--output", type=Path, default=Path("listminer"), help="Output directory")
     parser.add_argument("--no-cache", action="store_true", help="Disable caching of processed files")
     parser.add_argument("--clear-cache", action="store_true", help="Clear cache and exit")
+    parser.add_argument("--max-workers", type=int, default=None, 
+                        help=f"Maximum number of parallel workers (default: {MAX_WORKERS})")
     args = parser.parse_args()
     
     # Handle cache clearing
@@ -1327,7 +1520,10 @@ def main():
     if use_cache:
         log.info("File caching enabled (use --no-cache to disable)")
     
-    miner = PasswordRuleMiner(args.output, use_cache=use_cache)
+    max_workers = args.max_workers if args.max_workers else MAX_WORKERS
+    log.info(f"Parallel processing enabled with {max_workers} workers")
+    
+    miner = PasswordRuleMiner(args.output, use_cache=use_cache, max_workers=max_workers)
     miner.mine_potfiles(pot_files)
     if hash_files:
         miner.mine_hashfiles(hash_files)
