@@ -48,6 +48,10 @@ MAX_WORKERS = int(os.environ.get('LISTMINER_MAX_WORKERS', DEFAULT_WORKERS))
 # Higher values create more batches for better distribution and progress tracking
 BATCH_MULTIPLIER = 4
 
+# Minimum batch sizes for different operation types
+MIN_PASSWORD_BATCH_SIZE = 1000  # For password processing operations
+MIN_WORD_BATCH_SIZE = 10  # For word-level operations (smaller datasets)
+
 # =============================================
 # Logging
 # =============================================
@@ -504,14 +508,18 @@ class PasswordRuleMiner:
     # File parsing
     # -------------------------------
     @staticmethod
-    def _calculate_batch_size_for_workers(items_count: int, max_workers: int, min_batch_size: int = 1000) -> int:
+    def _calculate_batch_size_for_workers(items_count: int, max_workers: int, min_batch_size: int = MIN_PASSWORD_BATCH_SIZE) -> int:
         """
         Calculate optimal batch size for parallel processing.
         Uses BATCH_MULTIPLIER to ensure enough batches for load balancing.
+        Ensures minimum batch size of 1 to prevent division errors.
         """
-        return max(min_batch_size, items_count // (max_workers * BATCH_MULTIPLIER))
+        if items_count == 0:
+            return 1
+        calculated_size = items_count // (max_workers * BATCH_MULTIPLIER)
+        return max(1, min(min_batch_size, calculated_size)) if calculated_size < min_batch_size else calculated_size
     
-    def _calculate_batch_size(self, items_count: int, min_batch_size: int = 1000) -> int:
+    def _calculate_batch_size(self, items_count: int, min_batch_size: int = MIN_PASSWORD_BATCH_SIZE) -> int:
         """Calculate optimal batch size for parallel processing using instance workers"""
         return self._calculate_batch_size_for_workers(items_count, self.max_workers, min_batch_size)
     
@@ -1287,7 +1295,7 @@ class PasswordRuleMiner:
             return batch_rules
         
         # Create batches for parallel processing (smaller batches for word processing)
-        batch_size = self._calculate_batch_size_for_workers(len(top_words), self.max_workers, 10)
+        batch_size = self._calculate_batch_size_for_workers(len(top_words), self.max_workers, MIN_WORD_BATCH_SIZE)
         word_batches = [
             top_words[i:i + batch_size]
             for i in range(0, len(top_words), batch_size)

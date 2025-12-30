@@ -81,7 +81,7 @@ python3 listminer.py -p potfile.pot -o output --clear-cache
 
 **NEW:** ListMiner now supports parallel processing to significantly speed up rule generation tasks.
 
-- **Automatic worker detection**: By default, uses up to 8 workers or the number of CPU cores (whichever is lower)
+- **Automatic worker detection**: By default, uses up to 8 workers or the number of CPU cores (whichever is lower). The 8-worker cap prevents excessive thread overhead and context switching on high-core systems.
 - **Configurable workers**: Use `--max-workers` to set a custom number of parallel workers
 - **Environment variable**: Set `LISTMINER_MAX_WORKERS` environment variable for system-wide configuration
 - **Thread-safe logging**: All parallel operations maintain clear, synchronized logging output
