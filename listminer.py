@@ -182,46 +182,186 @@ def hashcat_append(word: str, max_length: int = 6) -> str:
 # =============================================
 # ADVANCED FEATURES: LEET MAPPING
 # =============================================
+# Expanded leet mapping with comprehensive character substitutions
+# Only includes single-character, ASCII-safe substitutions for Hashcat compatibility
 LEET_MAP = {
     'a': ['@', '4'],
-    'e': ['3'],
-    'i': ['1', '!'],
+    'A': ['@', '4'],
+    'e': ['3', '&'],
+    'E': ['3', '&'],
+    'i': ['1', '!', '|'],
+    'I': ['1', '!', '|'],
     'o': ['0'],
-    's': ['$', '5'],
+    'O': ['0'],
+    's': ['$', '5', 'z'],
+    'S': ['$', '5', 'z'],
     't': ['7', '+'],
-    'l': ['1'],
-    'g': ['9'],
-    'b': ['8'],
+    'T': ['7', '+'],
+    'l': ['1', '|'],
+    'L': ['1', '|'],
+    'g': ['9', '6'],
+    'G': ['9', '6'],
+    'b': ['8', '6'],
+    'B': ['8', '6'],
+    'z': ['2', '5'],
+    'Z': ['2', '5'],
+    'h': ['#'],
+    'H': ['#'],
+    'c': ['(', '<', '{'],
+    'C': ['(', '<', '{'],
+    'y': ['j'],
+    'Y': ['j'],
+    'x': ['%'],
+    'X': ['%'],
+    'p': ['9'],
+    'P': ['9'],
+    'q': ['9'],
+    'Q': ['9'],
+    'd': ['6'],
+    'D': ['6'],
+    'f': ['#'],
+    'F': ['#'],
+    'k': ['X'],
+    'K': ['X'],
 }
 
-def generate_leet_rules(word: str, max_substitutions: int = 2) -> List[str]:
+# Real-world leet pattern dictionary for known transformations
+# Maps common words to their realistic leet-speak variants
+LEET_PATTERNS = {
+    'password': ['p@ssword', 'passw0rd', 'p@ssw0rd', 'p@55w0rd', 'pa55word', 'pa55w0rd'],
+    'admin': ['@dmin', '4dmin', 'adm1n', '@dm1n', '4dm!n', '@dm!n'],
+    'welcome': ['w3lcome', 'welc0me', 'w3lc0me', 'w3lc0m3'],
+    'master': ['m@ster', 'ma5ter', 'm@5ter', 'm@57er'],
+    'login': ['l0gin', 'log1n', 'l0g1n', 'l0g!n'],
+    'system': ['sy5tem', 'syst3m', 'sy5t3m'],
+    'secure': ['secur3', 's3cure', 's3cur3', '53cure'],
+    'access': ['@ccess', 'acce55', '@cce55', 'acc355'],
+    'test': ['te5t', 't3st', 't35t'],
+    'root': ['r00t', 'r007'],
+    'user': ['u5er', 'us3r', 'u53r'],
+    'guest': ['gu3st', 'gue5t', 'gu35t'],
+    'elite': ['3lite', 'elit3', '3lit3', '31337'],
+    'hacker': ['h@cker', 'hack3r', 'h@ck3r', 'h4cker', 'h4ck3r'],
+    'power': ['p0wer', 'pow3r', 'p0w3r'],
+    'super': ['sup3r', '5uper', '5up3r'],
+    'dragon': ['dr@gon', 'drag0n', 'dr@g0n'],
+    'monkey': ['m0nkey', 'monk3y', 'm0nk3y'],
+    'football': ['f00tball', 'footb@ll', 'f00tb@ll'],
+    'baseball': ['b@seball', 'baseb@ll', 'b@seb@ll', 'ba5eball'],
+    'letmein': ['l3tmein', 'letme1n', 'l3tme1n'],
+    'trustno': ['tru5tno', 'trust#o', 'tru5t#o'],
+    'charlie': ['ch@rlie', 'charl1e', 'ch@rl1e'],
+    'shadow': ['sh@dow', 'shad0w', 'sh@d0w'],
+    'michael': ['mich@el', 'micha3l', 'mich@3l'],
+    'internet': ['1nternet', 'intern3t', '1ntern3t'],
+}
+
+# Leet rule scoring constants
+LEET_SCORE_PATTERN_MATCH = 1_000_000      # Real-world pattern matches (highest priority)
+LEET_SCORE_HIGH_PRIORITY = 800_000        # Common single substitutions (a→@, e→3, o→0)
+LEET_SCORE_MEDIUM_PRIORITY = 600_000      # Common single substitutions (secondary)
+LEET_SCORE_LOW_PRIORITY = 400_000         # Less common single substitutions
+LEET_SCORE_DOUBLE_HIGH = 500_000          # Double substitutions with common chars
+LEET_SCORE_DOUBLE_MEDIUM = 300_000        # Double substitutions (standard)
+LEET_SCORE_TRIPLE = 200_000               # Triple substitutions
+
+def generate_leet_rules(word: str, max_substitutions: int = 3) -> List[Tuple[int, str]]:
     """
-    Generate leet-speak Hashcat substitution rules for a word.
+    Generate prioritized leet-speak Hashcat substitution rules for a word.
     Uses 's' command for character substitution.
+    Returns list of (score, rule) tuples where higher scores indicate higher probability.
+    
+    Supports:
+    - Single, double, and triple character substitutions
+    - Real-world pattern matching
+    - ASCII-safe filtering for Hashcat compatibility
     """
     rules = []
     word_lower = word.lower()
+    
+    # Check for real-world pattern matches first (highest priority)
+    if word_lower in LEET_PATTERNS:
+        for leet_variant in LEET_PATTERNS[word_lower]:
+            # Generate rule to transform word to this variant
+            rule_parts = []
+            # Ensure both strings have the same length before zipping
+            min_len = min(len(word_lower), len(leet_variant))
+            for i in range(min_len):
+                orig_char = word_lower[i]
+                leet_char = leet_variant[i]
+                if orig_char != leet_char and is_ascii_safe(leet_char):
+                    rule_parts.append(f"s{orig_char}{leet_char}")
+            
+            if rule_parts:
+                rule = " ".join(rule_parts)
+                # Real-world patterns get highest score
+                rules.append((LEET_SCORE_PATTERN_MATCH, rule))
+    
+    # Find all positions that can be leet-substituted
     positions = [(i, c) for i, c in enumerate(word_lower) if c in LEET_MAP]
     
     if not positions:
         return rules
     
-    # Single substitutions
-    for _, char in positions:
+    # Single substitutions (high probability)
+    for pos, char in positions:
         for leet_char in LEET_MAP[char]:
-            rule = f"s{char}{leet_char}"
-            rules.append(rule)
+            # Only use ASCII-safe characters for Hashcat compatibility
+            if is_ascii_safe(leet_char) and len(leet_char) == 1:
+                rule = f"s{char}{leet_char}"
+                # Score based on common usage (a→@, e→3, o→0 most common)
+                if leet_char in ['@', '3', '0', '$', '1']:
+                    score = LEET_SCORE_HIGH_PRIORITY
+                elif leet_char in ['4', '5', '7', '!']:
+                    score = LEET_SCORE_MEDIUM_PRIORITY
+                else:
+                    score = LEET_SCORE_LOW_PRIORITY
+                rules.append((score, rule))
     
-    # Double substitutions (if enough positions)
+    # Double substitutions (medium probability)
     if len(positions) >= 2 and max_substitutions >= 2:
         for i in range(len(positions)):
-            for j in range(i + 1, min(i + 4, len(positions))):
+            for j in range(i + 1, min(i + 5, len(positions))):
                 _, char1 = positions[i]
                 _, char2 = positions[j]
+                
                 for leet1 in LEET_MAP[char1]:
+                    if not is_ascii_safe(leet1) or len(leet1) != 1:
+                        continue
                     for leet2 in LEET_MAP[char2]:
+                        if not is_ascii_safe(leet2) or len(leet2) != 1:
+                            continue
+                        
                         rule = f"s{char1}{leet1} s{char2}{leet2}"
-                        rules.append(rule)
+                        # Common double substitutions get higher scores
+                        if (char1 == 'a' and leet1 == '@') or (char2 == 'o' and leet2 == '0'):
+                            score = LEET_SCORE_DOUBLE_HIGH
+                        else:
+                            score = LEET_SCORE_DOUBLE_MEDIUM
+                        rules.append((score, rule))
+    
+    # Triple substitutions (lower probability, but comprehensive)
+    if len(positions) >= 3 and max_substitutions >= 3:
+        for i in range(len(positions)):
+            for j in range(i + 1, min(i + 3, len(positions))):
+                for k in range(j + 1, min(j + 2, len(positions))):
+                    _, char1 = positions[i]
+                    _, char2 = positions[j]
+                    _, char3 = positions[k]
+                    
+                    # Only use most common leet chars for triple substitutions
+                    common_leet = {
+                        'a': ['@', '4'], 'e': ['3'], 'i': ['1', '!'], 
+                        'o': ['0'], 's': ['$', '5'], 't': ['7']
+                    }
+                    
+                    if char1 in common_leet and char2 in common_leet and char3 in common_leet:
+                        for leet1 in common_leet[char1]:
+                            for leet2 in common_leet[char2]:
+                                for leet3 in common_leet[char3]:
+                                    rule = f"s{char1}{leet1} s{char2}{leet2} s{char3}{leet3}"
+                                    score = LEET_SCORE_TRIPLE
+                                    rules.append((score, rule))
     
     return rules
 
@@ -281,6 +421,71 @@ class BFSRuleGenerator:
                 if new_rule not in seen:
                     seen.add(new_rule)
                     queue.append((new_rule, depth + 1))
+        
+        return scored_rules
+    
+    def generate_leet_bfs_combos(self, base_words: List[str], limit: int = 100) -> List[Tuple[int, str]]:
+        """
+        Generate BFS-style combinations of leet transformations with other operations.
+        Explores leet-transform combinations dynamically.
+        """
+        scored_rules = []
+        
+        for word in base_words[:limit]:
+            if len(word) < 4 or len(word) > 10:
+                continue
+            
+            # Get basic leet rules for this word
+            leet_rules = []
+            word_lower = word.lower()
+            
+            # Generate single leet substitutions for BFS exploration
+            for char in word_lower:
+                if char in LEET_MAP:
+                    for leet_char in LEET_MAP[char]:
+                        if is_ascii_safe(leet_char) and len(leet_char) == 1:
+                            leet_rules.append(f"s{char}{leet_char}")
+            
+            # BFS exploration of leet + operations combinations
+            queue = deque()
+            
+            # Start with leet transformations
+            for leet_rule in leet_rules[:10]:  # Limit to avoid explosion
+                queue.append((leet_rule, 1))
+            
+            seen = set()
+            
+            while queue and len(scored_rules) < limit * 50:
+                current_rule, depth = queue.popleft()
+                
+                if current_rule in seen:
+                    continue
+                seen.add(current_rule)
+                
+                # Score based on depth and complexity
+                score = 400_000 // (depth + 1)
+                scored_rules.append((score, current_rule))
+                
+                if depth >= 2:  # Limit depth to avoid overly complex rules
+                    continue
+                
+                # Expand with case operations
+                for case_op in ['l', 'c', 'u', 't']:
+                    new_rule = f"{case_op} {current_rule}"
+                    if new_rule not in seen:
+                        queue.append((new_rule, depth + 1))
+                
+                # Expand with simple append/prepend
+                for op in ['$!', '$1', '^!', '^1']:
+                    new_rule = f"{current_rule} {op}"
+                    if new_rule not in seen:
+                        queue.append((new_rule, depth + 1))
+                
+                # Expand with duplication
+                if depth == 1:  # Only at depth 1 to avoid complexity
+                    new_rule = f"{current_rule} d"
+                    if new_rule not in seen:
+                        queue.append((new_rule, depth + 1))
         
         return scored_rules
     
@@ -431,6 +636,14 @@ class PasswordRuleMiner:
         # Advanced features
         self.trie = PasswordTrie()
         self.bfs_generator = BFSRuleGenerator(max_depth=3)
+        
+        # Stats tracking for leet transformations
+        self.leet_stats = {
+            'basic_rules': 0,
+            'hybrid_rules': 0,
+            'bfs_leet_rules': 0,
+            'pattern_matches': 0
+        }
         
         # Caching
         cache_dir = self.out / ".listminer_cache"
@@ -1114,8 +1327,11 @@ class PasswordRuleMiner:
                 ])
     
     def generate_leet_rules(self):
-        """Generate leet-speak mutation rules"""
-        log.info("Generating leet-speak mutation rules...")
+        """
+        Generate prioritized leet-speak mutation rules with hybrid transformations.
+        Combines leet with case transformations, prefix/suffix additions, and more.
+        """
+        log.info("Generating advanced leet-speak mutation rules...")
         
         # Get top base words from passwords
         base_words = []
@@ -1126,24 +1342,74 @@ class PasswordRuleMiner:
             if 4 <= len(cleaned) <= 12:
                 word_counter[cleaned] += 1
         
-        # Get top 500 words for leet generation
-        top_words = [word for word, _ in word_counter.most_common(500)]
+        # Get top 1000 words for leet generation
+        top_words = [word for word, _ in word_counter.most_common(1000)]
         
         leet_count = 0
-        for word in progress(top_words, desc="Generating leet rules", leave=False):
-            leet_variants = generate_leet_rules(word, max_substitutions=2)
-            for rule in leet_variants:
-                # Score based on word frequency and rule complexity
-                freq = word_counter[word]
-                score = int(freq * 5000)
-                self.scored_rules.append((score, rule))
-                leet_count += 1
+        hybrid_count = 0
+        pattern_match_count = 0
         
-        log.info(f"Generated {leet_count:,} leet-speak mutation rules")
+        for word in progress(top_words, desc="Generating leet rules", leave=False):
+            # Generate basic leet variants with scoring
+            leet_variants = generate_leet_rules(word, max_substitutions=3)
+            
+            # Track pattern matches
+            if word.lower() in LEET_PATTERNS:
+                pattern_match_count += len(LEET_PATTERNS[word.lower()])
+            
+            for score, rule in leet_variants:
+                # Add base leet rule with frequency-based scoring
+                freq = word_counter[word]
+                adjusted_score = score + (freq * 1000)
+                self.scored_rules.append((adjusted_score, rule))
+                leet_count += 1
+                
+                # Generate hybrid rules: leet + case transformations
+                # Hybrid 1: lowercase + leet
+                self.scored_rules.append((adjusted_score - 50000, f"l {rule}"))
+                hybrid_count += 1
+                
+                # Hybrid 2: capitalize + leet
+                self.scored_rules.append((adjusted_score - 100000, f"c {rule}"))
+                hybrid_count += 1
+                
+                # Hybrid 3: uppercase + leet (lower probability)
+                self.scored_rules.append((adjusted_score - 150000, f"u {rule}"))
+                hybrid_count += 1
+                
+                # Hybrid 4: leet + common suffixes
+                for suffix, suf_count in list(self.suffix.most_common(20)):
+                    if len(suffix) <= 3 and is_ascii_safe(suffix):
+                        app = hashcat_append(suffix)
+                        if app:
+                            hybrid_score = adjusted_score - 200000 + (suf_count * 100)
+                            self.scored_rules.append((hybrid_score, f"{rule} {app}"))
+                            hybrid_count += 1
+                
+                # Hybrid 5: leet + year patterns (common in passwords)
+                for year in ['2024', '2025', '23', '24', '25']:
+                    year_app = hashcat_append(year)
+                    if year_app:
+                        self.scored_rules.append((adjusted_score - 250000, f"{rule} {year_app}"))
+                        hybrid_count += 1
+                
+                # Hybrid 6: leet + duplication
+                if len(rule.split()) <= 2:  # Only for simple rules
+                    self.scored_rules.append((adjusted_score - 300000, f"{rule} d"))
+                    hybrid_count += 1
+        
+        # Update stats
+        self.leet_stats['basic_rules'] = leet_count
+        self.leet_stats['hybrid_rules'] = hybrid_count
+        self.leet_stats['pattern_matches'] = pattern_match_count
+        
+        log.info(f"Generated {leet_count:,} prioritized leet-speak rules")
+        log.info(f"Generated {hybrid_count:,} hybrid leet transformation rules")
+        log.info(f"Matched {pattern_match_count:,} real-world leet patterns")
     
     def generate_bfs_complex_rules(self):
-        """Generate complex rules using BFS exploration"""
-        log.info("Generating BFS-based complex rules...")
+        """Generate complex rules using BFS exploration with leet transformations"""
+        log.info("Generating BFS-based complex rules with leet exploration...")
         
         # Generate basic BFS rules
         bfs_rules = self.bfs_generator.generate()
@@ -1157,6 +1423,22 @@ class PasswordRuleMiner:
         combo_rules = self.bfs_generator.generate_append_prepend_combos(common_strings, limit=50)
         self.scored_rules.extend(combo_rules)
         log.info(f"Generated {len(combo_rules):,} BFS combination rules")
+        
+        # NEW: Generate leet BFS combinations
+        # Get top base words for leet exploration
+        base_words = []
+        word_counter = Counter()
+        for pwd in self.passwords:
+            cleaned_lower = re.sub(r'[^a-zA-Z]', '', pwd.lower())
+            if 4 <= len(cleaned_lower) <= 10:
+                word_counter[cleaned_lower] += 1
+        
+        top_base_words = [word for word, _ in word_counter.most_common(100)]
+        
+        leet_bfs_rules = self.bfs_generator.generate_leet_bfs_combos(top_base_words, limit=50)
+        self.scored_rules.extend(leet_bfs_rules)
+        self.leet_stats['bfs_leet_rules'] = len(leet_bfs_rules)
+        log.info(f"Generated {len(leet_bfs_rules):,} leet BFS combination rules")
     
     def generate_trie_based_bases(self):
         """Generate enhanced base wordlist using trie analysis"""
@@ -1193,6 +1475,43 @@ class PasswordRuleMiner:
         usernames = sorted(self.usernames.keys())
         out_file.write_text("\n".join(usernames) + "\n", encoding="utf-8")
         log.info(f" → {out_file.name} ({len(usernames):,} unique usernames)")
+    
+    def merge_all_wordlists(self):
+        """
+        Merge usernames.txt, 00_real_bases.txt, 00_analyzed_bases.txt, and 00_trie_bases.txt
+        into a single unified wordlist with unique entries.
+        """
+        log.info("Merging all wordlists into unified base wordlist...")
+        
+        all_words = set()
+        files_to_merge = [
+            self.out / "usernames.txt",
+            self.out / "00_real_bases.txt",
+            self.out / "00_analyzed_bases.txt",
+            self.out / "00_trie_bases.txt"
+        ]
+        
+        for filepath in files_to_merge:
+            if filepath.exists():
+                try:
+                    with filepath.open("r", encoding="utf-8", errors="ignore") as f:
+                        for line in f:
+                            word = line.strip()
+                            if word and len(word) >= 3:  # Minimum 3 characters
+                                all_words.add(word)
+                    log.info(f"  → Merged {filepath.name}")
+                except Exception as e:
+                    log.warning(f"  → Could not read {filepath.name}: {e}")
+        
+        # Sort words for better organization (by length, then alphabetically)
+        sorted_words = sorted(all_words, key=lambda x: (len(x), x.lower()))
+        
+        # Write merged wordlist
+        merged_file = self.out / "00_unified_wordlist.txt"
+        merged_file.write_text("\n".join(sorted_words) + "\n", encoding="utf-8")
+        log.info(f" → 00_unified_wordlist.txt ({len(sorted_words):,} unique words)")
+        
+        return sorted_words
     
     def write_rules(self):
         log.info("Writing rule files...")
@@ -1252,8 +1571,16 @@ class PasswordRuleMiner:
         stats = f"""
 Target Analysis Report — {datetime.now():%Y-%m-%d %H:%M}
 Total passwords parsed: {len(self.passwords):,}
+Unique usernames extracted: {len(self.usernames):,}
 Top prefixes: {', '.join(k for k, _ in self.prefix.most_common(15))}
 Top suffixes: {', '.join(k for k, _ in self.suffix.most_common(15))}
+
+Advanced Leet Transformation Statistics:
+- Basic leet rules generated: {self.leet_stats['basic_rules']:,}
+- Hybrid leet rules generated: {self.leet_stats['hybrid_rules']:,}
+- BFS leet exploration rules: {self.leet_stats['bfs_leet_rules']:,}
+- Real-world pattern matches: {self.leet_stats['pattern_matches']:,}
+- Total leet-based rules: {sum([self.leet_stats['basic_rules'], self.leet_stats['hybrid_rules'], self.leet_stats['bfs_leet_rules']]):,}
         """.strip()
         (self.out / "stats.txt").write_text(stats + "\n")
         log.info(f" → stats.txt")
@@ -1279,6 +1606,9 @@ Top suffixes: {', '.join(k for k, _ in self.suffix.most_common(15))}
         
         # NEW: Comprehensive password analysis
         self.analyze_password_transformations()
+        
+        # NEW: Merge all wordlists into unified file
+        self.merge_all_wordlists()
         
         # Write outputs
         self.write_rules()

@@ -102,8 +102,10 @@ All artifacts are written to the specified output directory.
 
 | File                        | Description                                                          |
 | --------------------------- | -------------------------------------------------------------------- |
+| `00_unified_wordlist.txt`   | **NEW:** Merged and deduplicated wordlist from all base sources      |
 | `00_real_bases.txt`         | Top base words extracted from potfiles (filtered 4+ character words) |
-| `00_trie_bases.txt`         | **NEW:** Enhanced base words using trie-based pattern analysis       |
+| `00_analyzed_bases.txt`     | Base words from comprehensive password transformation analysis       |
+| `00_trie_bases.txt`         | Enhanced base words using trie-based pattern analysis                |
 | `usernames.txt`             | Unique usernames parsed from hashfiles                               |
 | `01_elite.rule`             | Top 15,000 pre-scored Hashcat rules (includes advanced features)     |
 | `02_extended_50k.rule`      | Top 50,000 pre-scored Hashcat rules (includes advanced features)     |
@@ -153,25 +155,86 @@ All artifacts are written to the specified output directory.
 
 ## Advanced Features
 
-### Leet-Speak Mutation Rules
+### Enhanced Leet-Speak Mutation Rules
 
-The tool automatically generates leet-speak (1337) character substitution rules based on common patterns found in password databases:
+The tool now features **comprehensive leet-speak (1337) transformation capabilities** based on common patterns found in password databases:
 
-* `a` → `@`, `4`
-* `e` → `3`
-* `i` → `1`, `!`
-* `o` → `0`
-* `s` → `$`, `5`
-* `t` → `7`, `+`
-* `l` → `1`
-* `g` → `9`
-* `b` → `8`
+#### Expanded Character Mappings
 
-These rules use Hashcat's `s` (substitute) command to generate variants like:
-- `password` → `p@ssword`, `passw0rd`, `p@ssw0rd`
-- `elite` → `3lite`, `elit3`, `3lit3`
+* **Lowercase and Uppercase Support (ASCII-safe only):**
+  * `a/A` → `@`, `4`
+  * `e/E` → `3`, `&`
+  * `i/I` → `1`, `!`, `|`
+  * `o/O` → `0`
+  * `s/S` → `$`, `5`, `z`
+  * `t/T` → `7`, `+`
+  * `l/L` → `1`, `|`
+  * `g/G` → `9`, `6`
+  * `b/B` → `8`, `6`
+  * `z/Z` → `2`, `5`
+  * `h/H` → `#`
+  * `c/C` → `(`, `<`, `{`
+  * `y/Y` → `j`
+  * `x/X` → `%`
+  * `p/P`, `q/Q` → `9`
+  * `d/D` → `6`
+  * `f/F` → `#`
+  * `k/K` → `X`
 
-### BFS-Based Complex Rule Generation
+#### Real-World Pattern Dictionary
+
+Pre-defined transformations for common words with realistic leet-speak variants:
+- `password` → `p@ssword`, `passw0rd`, `p@ssw0rd`, `p@55w0rd`, `pa55word`, `pa55w0rd`
+- `admin` → `@dmin`, `4dmin`, `adm1n`, `@dm1n`, `4dm!n`, `@dm!n`
+- `welcome` → `w3lcome`, `welc0me`, `w3lc0me`, `w3lc0m3`
+- `elite` → `3lite`, `elit3`, `3lit3`, `31337`
+- And many more...
+
+#### Dynamic Multi-Character Transformations
+
+* **Single Substitutions:** High-probability transformations (`a→@`, `e→3`, `o→0`) scored 800,000
+* **Double Substitutions:** Medium-probability combinations scored 300,000-500,000
+* **Triple Substitutions:** Comprehensive coverage scored 200,000
+
+#### Rule Prioritization
+
+Rules are assigned weights based on their real-world probability:
+- Real-world pattern matches: 1,000,000
+- Common single substitutions: 400,000-800,000
+- Double substitutions: 300,000-500,000
+- Triple substitutions: 200,000
+- Hybrid transformations: Adjusted based on base score
+
+#### Hybrid Leet Rules
+
+Combines leet transformations with other operations:
+1. **Leet + Case:** `l {leet}`, `c {leet}`, `u {leet}`
+2. **Leet + Suffix:** Common suffixes appended after leet transformation
+3. **Leet + Year:** Year patterns (2024, 2025, etc.) with leet
+4. **Leet + Duplication:** `{leet} d` for doubled passwords
+
+### BFS-Based Leet Exploration
+
+Uses breadth-first search to dynamically explore leet-transform combinations:
+* Combines leet substitutions with case operations (`l`, `c`, `u`, `t`)
+* Adds common append/prepend operations (`$!`, `$1`, `^!`, `^1`)
+* Explores duplication with leet variants
+* Limits depth to maintain practical rule efficiency
+* Generates 1000s of targeted transformation rules
+
+### Unified Wordlist Generation
+
+**NEW:** Automatically merges and deduplicates all base word sources:
+- Usernames from hashfiles
+- Real bases from potfiles
+- Analyzed bases from transformation analysis
+- Trie-based bases from pattern analysis
+
+Output: `00_unified_wordlist.txt` with unique, sorted entries
+
+These rules use Hashcat's `s` (substitute) command to generate variants efficiently.
+
+### Original BFS-Based Complex Rule Generation
 
 Uses breadth-first search to explore combinations of Hashcat operations:
 
