@@ -18,7 +18,7 @@ import re
 import signal
 import sys
 from collections import Counter, defaultdict, deque
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from threading import Lock
@@ -421,7 +421,7 @@ class PasswordTrie:
             max_workers = MAX_WORKERS
         
         # Create batches for parallel processing
-        batch_size = max(1000, len(passwords) // (max_workers * 4))
+        batch_size = PasswordRuleMiner._calculate_batch_size_for_workers(len(passwords), max_workers)
         password_batches = [
             passwords[i:i + batch_size]
             for i in range(0, len(passwords), batch_size)
@@ -500,6 +500,15 @@ class PasswordRuleMiner:
     # -------------------------------
     # File parsing
     # -------------------------------
+    @staticmethod
+    def _calculate_batch_size_for_workers(items_count: int, max_workers: int, min_batch_size: int = 1000) -> int:
+        """Calculate optimal batch size for parallel processing"""
+        return max(min_batch_size, items_count // (max_workers * 4))
+    
+    def _calculate_batch_size(self, items_count: int, min_batch_size: int = 1000) -> int:
+        """Calculate optimal batch size for parallel processing using instance workers"""
+        return self._calculate_batch_size_for_workers(items_count, self.max_workers, min_batch_size)
+    
     def _add_scored_rules(self, rules: List[Tuple[int, str]]):
         """Thread-safe method to add scored rules"""
         with self._rules_lock:
@@ -716,7 +725,7 @@ class PasswordRuleMiner:
             return batch_counter
         
         # Create batches for parallel processing
-        batch_size = max(1000, len(self.passwords) // (self.max_workers * 4))
+        batch_size = self._calculate_batch_size(len(self.passwords))
         password_batches = [
             self.passwords[i:i + batch_size]
             for i in range(0, len(self.passwords), batch_size)
@@ -942,7 +951,7 @@ class PasswordRuleMiner:
         skipped_count = 0
         
         # Create batches for parallel processing
-        batch_size = max(1000, len(self.passwords) // (self.max_workers * 4))
+        batch_size = self._calculate_batch_size(len(self.passwords))
         password_batches = [
             self.passwords[i:i + batch_size] 
             for i in range(0, len(self.passwords), batch_size)

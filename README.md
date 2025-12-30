@@ -53,7 +53,7 @@ options:
   --no-cache            Disable caching of processed files
   --clear-cache         Clear cache and exit
   --max-workers MAX_WORKERS
-                        Maximum number of parallel workers (default: auto-detected)
+                        Maximum number of parallel workers (default: min(8, CPU count))
 ```
 
 ### Caching
