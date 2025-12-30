@@ -15,10 +15,10 @@ import logging
 import re
 import signal
 import sys
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from datetime import datetime
 from pathlib import Path
-from typing import List, Iterable, Dict
+from typing import List, Iterable, Dict, Set, Tuple, Optional
 
 # =============================================
 # PROGRESS BAR
@@ -87,6 +87,237 @@ def hashcat_append(word: str) -> str:
     return " ".join(f"${c}" for c in word)
 
 # =============================================
+# ADVANCED FEATURES: LEET MAPPING
+# =============================================
+LEET_MAP = {
+    'a': ['@', '4'],
+    'e': ['3'],
+    'i': ['1', '!'],
+    'o': ['0'],
+    's': ['$', '5'],
+    't': ['7', '+'],
+    'l': ['1'],
+    'g': ['9'],
+    'b': ['8'],
+}
+
+def generate_leet_rules(word: str, max_substitutions: int = 2) -> List[str]:
+    """
+    Generate leet-speak Hashcat substitution rules for a word.
+    Uses 's' command for character substitution.
+    """
+    rules = []
+    word_lower = word.lower()
+    positions = [(i, c) for i, c in enumerate(word_lower) if c in LEET_MAP]
+    
+    if not positions:
+        return rules
+    
+    # Single substitutions
+    for pos, char in positions:
+        for leet_char in LEET_MAP[char]:
+            rule = f"s{char}{leet_char}"
+            rules.append(rule)
+    
+    # Double substitutions (if enough positions)
+    if len(positions) >= 2 and max_substitutions >= 2:
+        for i in range(len(positions)):
+            for j in range(i + 1, min(i + 4, len(positions))):
+                pos1, char1 = positions[i]
+                pos2, char2 = positions[j]
+                for leet1 in LEET_MAP[char1]:
+                    for leet2 in LEET_MAP[char2]:
+                        rule = f"s{char1}{leet1} s{char2}{leet2}"
+                        rules.append(rule)
+    
+    return rules
+
+# =============================================
+# ADVANCED FEATURES: BFS RULE GENERATION
+# =============================================
+class BFSRuleGenerator:
+    """
+    Generate complex Hashcat rules using BFS exploration.
+    Combines multiple operations in sequence for comprehensive coverage.
+    """
+    
+    # Basic Hashcat operations
+    OPERATIONS = [
+        ('l', 'lowercase'),
+        ('u', 'uppercase'),
+        ('c', 'capitalize'),
+        ('C', 'invert capitalize'),
+        ('t', 'toggle case'),
+        ('r', 'reverse'),
+        ('d', 'duplicate'),
+        ('{', 'rotate left'),
+        ('}', 'rotate right'),
+    ]
+    
+    def __init__(self, max_depth: int = 3):
+        self.max_depth = max_depth
+        self.rules: Set[str] = set()
+    
+    def generate(self, base_ops: Optional[List[str]] = None) -> List[Tuple[int, str]]:
+        """
+        Generate rules using BFS with scoring.
+        Returns list of (score, rule) tuples.
+        """
+        if base_ops is None:
+            base_ops = [op[0] for op in self.OPERATIONS[:6]]  # First 6 ops
+        
+        scored_rules = []
+        queue = deque([("", 0)])  # (rule, depth)
+        seen = {""}
+        
+        while queue:
+            current_rule, depth = queue.popleft()
+            
+            if depth > 0:
+                # Score based on complexity and depth
+                score = 500_000 // (depth + 1)
+                scored_rules.append((score, current_rule.strip()))
+            
+            if depth >= self.max_depth:
+                continue
+            
+            # Expand with each operation
+            for op in base_ops:
+                new_rule = f"{current_rule} {op}".strip() if current_rule else op
+                if new_rule not in seen:
+                    seen.add(new_rule)
+                    queue.append((new_rule, depth + 1))
+        
+        return scored_rules
+    
+    def generate_append_prepend_combos(self, common_strings: List[str], limit: int = 100) -> List[Tuple[int, str]]:
+        """
+        Generate BFS-style combinations of prepend and append operations.
+        """
+        scored_rules = []
+        
+        for s in common_strings[:limit]:
+            if len(s) < 1 or len(s) > 4:
+                continue
+            
+            # Prepend only
+            prep = hashcat_prepend(s)
+            scored_rules.append((300_000, prep))
+            
+            # Append only
+            app = hashcat_append(s)
+            scored_rules.append((300_000, app))
+            
+            # Prepend + append same
+            scored_rules.append((250_000, f"{prep} {app}"))
+            
+            # With case operations
+            scored_rules.append((280_000, f"l {app}"))
+            scored_rules.append((275_000, f"c {app}"))
+            scored_rules.append((270_000, f"l {prep}"))
+            scored_rules.append((265_000, f"c {prep}"))
+        
+        return scored_rules
+
+# =============================================
+# ADVANCED FEATURES: TRIE-BASED BASE ANALYSIS
+# =============================================
+class TrieNode:
+    """Node for Trie data structure"""
+    def __init__(self):
+        self.children: Dict[str, 'TrieNode'] = {}
+        self.is_end = False
+        self.frequency = 0
+        self.word = ""
+
+class PasswordTrie:
+    """
+    Trie-based structure for efficient password pattern analysis.
+    Helps identify common base words and patterns in passwords.
+    """
+    
+    def __init__(self):
+        self.root = TrieNode()
+        self.total_words = 0
+    
+    def insert(self, word: str, frequency: int = 1):
+        """Insert a word into the trie with its frequency"""
+        if not word:
+            return
+        
+        node = self.root
+        for char in word:
+            if char not in node.children:
+                node.children[char] = TrieNode()
+            node = node.children[char]
+        
+        node.is_end = True
+        node.frequency += frequency
+        node.word = word
+        self.total_words += frequency
+    
+    def find_common_prefixes(self, min_length: int = 3, min_freq: int = 5) -> List[Tuple[str, int]]:
+        """Find common prefixes that appear frequently"""
+        prefixes = []
+        
+        def dfs(node: TrieNode, prefix: str):
+            # Check children count (branching factor)
+            if len(prefix) >= min_length:
+                child_freq = sum(self._count_words(child) for child in node.children.values())
+                if child_freq >= min_freq:
+                    prefixes.append((prefix, child_freq))
+            
+            for char, child in node.children.items():
+                dfs(child, prefix + char)
+        
+        dfs(self.root, "")
+        return sorted(prefixes, key=lambda x: x[1], reverse=True)
+    
+    def _count_words(self, node: TrieNode) -> int:
+        """Count total words under a node"""
+        count = node.frequency if node.is_end else 0
+        for child in node.children.values():
+            count += self._count_words(child)
+        return count
+    
+    def get_all_words(self, min_freq: int = 1) -> List[Tuple[str, int]]:
+        """Get all complete words from trie with their frequencies"""
+        words = []
+        
+        def dfs(node: TrieNode):
+            if node.is_end and node.frequency >= min_freq:
+                words.append((node.word, node.frequency))
+            
+            for child in node.children.values():
+                dfs(child)
+        
+        dfs(self.root)
+        return sorted(words, key=lambda x: x[1], reverse=True)
+    
+    def extract_base_words(self, passwords: List[str]) -> List[Tuple[str, int]]:
+        """
+        Extract and analyze base words from passwords.
+        Strips common patterns and returns high-quality bases.
+        """
+        word_counter = Counter()
+        
+        for pwd in passwords:
+            # Clean the password - remove numbers, special chars at ends
+            cleaned = re.sub(r'^[^a-zA-Z]+', '', pwd)
+            cleaned = re.sub(r'[^a-zA-Z]+$', '', cleaned)
+            cleaned = re.sub(r'\d{2,}', '', cleaned)  # Remove number sequences
+            
+            # Extract alpha sequences
+            alpha_parts = re.findall(r'[a-zA-Z]{3,}', cleaned)
+            for part in alpha_parts:
+                part_lower = part.lower()
+                if 3 <= len(part_lower) <= 15:
+                    word_counter[part_lower] += 1
+                    self.insert(part_lower, 1)
+        
+        return word_counter.most_common()
+
+# =============================================
 # MAIN CLASS — PASSWORD RULE MINER
 # =============================================
 class PasswordRuleMiner:
@@ -98,6 +329,10 @@ class PasswordRuleMiner:
         self.prefix = Counter()
         self.suffix = Counter()
         self.usernames: Dict[str, List[str]] = defaultdict(list)
+        
+        # Advanced features
+        self.trie = PasswordTrie()
+        self.bfs_generator = BFSRuleGenerator(max_depth=3)
 
         # ======= Fix: Compile the USER_PATTERNS =======
         self.COMPILED_USER_RE = [re.compile(p) for p in self.USER_PATTERNS]
@@ -325,6 +560,78 @@ class PasswordRuleMiner:
                     (900_000, f"l{app} $!"),
                     (895_000, f"l c{app} $!"),
                 ])
+    
+    def generate_leet_rules(self):
+        """Generate leet-speak mutation rules"""
+        log.info("Generating leet-speak mutation rules...")
+        
+        # Get top base words from passwords
+        base_words = []
+        word_counter = Counter()
+        for pwd in progress(self.passwords, desc="Analyzing for leet", leave=False):
+            # Extract alphabetic base
+            cleaned = re.sub(r'[^a-zA-Z]', '', pwd.lower())
+            if 4 <= len(cleaned) <= 12:
+                word_counter[cleaned] += 1
+        
+        # Get top 500 words for leet generation
+        top_words = [word for word, _ in word_counter.most_common(500)]
+        
+        leet_count = 0
+        for word in progress(top_words, desc="Generating leet rules", leave=False):
+            leet_variants = generate_leet_rules(word, max_substitutions=2)
+            for rule in leet_variants:
+                # Score based on word frequency and rule complexity
+                freq = word_counter[word]
+                score = int(freq * 5000)
+                self.scored_rules.append((score, rule))
+                leet_count += 1
+        
+        log.info(f"Generated {leet_count:,} leet-speak mutation rules")
+    
+    def generate_bfs_complex_rules(self):
+        """Generate complex rules using BFS exploration"""
+        log.info("Generating BFS-based complex rules...")
+        
+        # Generate basic BFS rules
+        bfs_rules = self.bfs_generator.generate()
+        self.scored_rules.extend(bfs_rules)
+        log.info(f"Generated {len(bfs_rules):,} BFS exploration rules")
+        
+        # Generate BFS combinations with common strings
+        common_strings = [s for s, _ in self.suffix.most_common(50)]
+        common_strings.extend([p for p, _ in self.prefix.most_common(50)])
+        
+        combo_rules = self.bfs_generator.generate_append_prepend_combos(common_strings, limit=50)
+        self.scored_rules.extend(combo_rules)
+        log.info(f"Generated {len(combo_rules):,} BFS combination rules")
+    
+    def generate_trie_based_bases(self):
+        """Generate enhanced base wordlist using trie analysis"""
+        log.info("Generating trie-based base word analysis...")
+        
+        # Extract base words using trie
+        trie_bases = self.trie.extract_base_words(self.passwords)
+        
+        # Get high-quality words
+        quality_bases = []
+        for word, freq in trie_bases:
+            if freq >= 2 and 4 <= len(word) <= 15:
+                quality_bases.append((word, freq))
+        
+        # Also find common prefixes for pattern analysis
+        common_prefixes = self.trie.find_common_prefixes(min_length=3, min_freq=10)
+        
+        log.info(f"Trie analysis found {len(quality_bases):,} quality base words")
+        log.info(f"Identified {len(common_prefixes):,} common prefixes")
+        
+        # Write enhanced base file
+        out_file = self.out / "00_trie_bases.txt"
+        bases_text = "\n".join([word for word, _ in quality_bases[:5_000_000]])
+        out_file.write_text(bases_text + "\n", encoding="utf-8")
+        log.info(f" → 00_trie_bases.txt ({len(quality_bases[:5_000_000]):,} bases)")
+        
+        return quality_bases, common_prefixes
     def write_username_wordlist(self):
         """
         Write a wordlist of unique usernames to a file.
@@ -403,14 +710,26 @@ Top suffixes: {', '.join(k for k, _ in self.suffix.most_common(15))}
     # Full artifact generation
     # -------------------------------
     def generate_all_artifacts(self):
+        log.info("Phase 2/3: Generating artifacts with advanced features...")
+        
+        # Original features
         self.generate_real_bases()
         self.generate_user_context_rules()
         self.write_username_wordlist() 
         self.generate_prefix_suffix_rules()
         self.generate_surround_rules()
         self.generate_static_and_year_rules()
+        
+        # Advanced features
+        self.generate_leet_rules()
+        self.generate_bfs_complex_rules()
+        self.generate_trie_based_bases()
+        
+        # Write outputs
         self.write_rules()
         self.generate_masks_and_years()
+        
+        log.info("Phase 3/3: All artifacts generated successfully!")
         log.info(f"\nALL DONE! → {self.out.resolve()}")
 
 # =============================================
