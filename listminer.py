@@ -147,22 +147,36 @@ def is_ascii_safe(text: str) -> bool:
 
 def hashcat_prepend(word: str, reverse: bool = True, max_length: int = 6) -> str:
     """
-    Generate Hashcat prepend rule (^ per char), optionally reversed.
+    Generate efficient Hashcat prepend rule using only Hashcat syntax.
+    Uses ^X for each character (reversed order for proper prepending).
     Limited to max_length characters for practical rule efficiency.
     """
     if not is_ascii_safe(word) or len(word) > max_length or len(word) == 0:
         return None
+    
+    # For single character, use ^X
+    if len(word) == 1:
+        return f"^{word}"
+    
+    # For multiple characters, use individual ^ commands (reversed for correct order)
     if reverse:
         word = word[::-1]
     return " ".join(f"^{c}" for c in word)
 
 def hashcat_append(word: str, max_length: int = 6) -> str:
     """
-    Generate Hashcat append rule ($ per char).
+    Generate efficient Hashcat append rule using only Hashcat syntax.
+    Uses $X for each character (Hashcat standard).
     Limited to max_length characters for practical rule efficiency.
     """
     if not is_ascii_safe(word) or len(word) > max_length or len(word) == 0:
         return None
+    
+    # For single character, use $X
+    if len(word) == 1:
+        return f"${word}"
+    
+    # For multiple characters, use individual $ commands
     return " ".join(f"${c}" for c in word)
 
 # =============================================
