@@ -631,11 +631,11 @@ class PasswordRuleMiner:
 
         counter = Counter()
         for pwd in self.passwords:
-            pwd = pwd.lower()
-            # Remove years, special chars, trailing numbers
-            pwd = re.sub(r'(202[0-9]|19[0-9]{2}|[!@#$%^&*]+|[0-9]{3,}$)', '', pwd, flags=re.I)
-            if re.fullmatch(r'[a-z]{4,}', pwd):
-                counter[pwd] += 1
+            # Try multiple extraction strategies
+            bases = self._extract_simple_bases(pwd)
+            for base in bases:
+                if len(base) >= 4:
+                    counter[base] += 1
 
         # Keep top_n most common
         top_bases = [word for word, _ in counter.most_common(top_n)]
@@ -643,6 +643,63 @@ class PasswordRuleMiner:
         out_file = self.out / "00_real_bases.txt"
         out_file.write_text("\n".join(top_bases) + "\n", encoding="utf-8")
         log.info(f" → 00_real_bases.txt ({len(top_bases):,} bases)")
+    
+    def _extract_simple_bases(self, password: str) -> List[str]:
+        """
+        Extract base words from a password using multiple simple strategies.
+        Returns a list of potential base words.
+        """
+        bases = []
+        
+        # Strategy 1: Unleet and extract alphabetic sequences
+        unleeted = self._unleet_string(password).lower()
+        
+        # Extract all alphabetic sequences of 4+ characters
+        for match in re.finditer(r'[a-z]{4,}', unleeted):
+            base = match.group()
+            # Skip if it's mostly consonants (likely not a word)
+            vowels = sum(1 for c in base if c in 'aeiouy')
+            if vowels >= len(base) * 0.2:  # At least 20% vowels
+                bases.append(base)
+        
+        # Strategy 2: Remove all non-alphabetic and extract longest sequences
+        # First unleet the password
+        unleeted_pwd = self._unleet_string(password)
+        # Remove all numbers and special chars
+        cleaned = re.sub(r'[^a-zA-Z]+', '', unleeted_pwd)
+        if len(cleaned) >= 4:
+            bases.append(cleaned.lower())
+        
+        # Strategy 3: Strip edges and extract core
+        # Remove leading/trailing non-alpha
+        stripped = re.sub(r'^[^a-zA-Z]+|[^a-zA-Z]+$', '', password)
+        if stripped:
+            # Unleet it
+            unleeted_stripped = self._unleet_string(stripped)
+            # Remove any remaining non-alpha from middle
+            cleaned_stripped = re.sub(r'[^a-zA-Z]+', '', unleeted_stripped)
+            if len(cleaned_stripped) >= 4:
+                bases.append(cleaned_stripped.lower())
+        
+        # Strategy 4: Extract word-like patterns (sequences with vowels)
+        # Find all alphabetic sequences in the unleeted password
+        all_alpha_sequences = re.findall(r'[a-z]{4,}', unleeted)
+        for seq in all_alpha_sequences:
+            # Check if it looks like a real word (has vowels)
+            vowels = sum(1 for c in seq if c in 'aeiouy')
+            if vowels >= 2 or vowels >= len(seq) * 0.25:
+                bases.append(seq)
+        
+        # Remove duplicates and sort by length (longest first)
+        unique_bases = list(dict.fromkeys(bases))
+        # Filter out bases that are substrings of longer bases
+        filtered_bases = []
+        for base in sorted(unique_bases, key=len, reverse=True):
+            # Check if this base is a substring of any already added base
+            if not any(base in existing and base != existing for existing in filtered_bases):
+                filtered_bases.append(base)
+        
+        return filtered_bases
     
     def _unleet_char(self, char: str) -> str:
         """Convert a leet character back to its original form"""
@@ -656,11 +713,30 @@ class PasswordRuleMiner:
             '9': 'g',
             '8': 'b'
         }
-        return leet_reverse.get(char.lower(), char)
+        return leet_reverse.get(char, char)
     
     def _unleet_string(self, text: str) -> str:
-        """Convert a leet-speak string back to normal text"""
-        return ''.join(self._unleet_char(c) if c in '@4310!$579+8' else c for c in text)
+        """
+        Convert a leet-speak string back to normal text.
+        Only unleets characters that are clearly leet (special chars and single digits within letters).
+        """
+        result = []
+        for i, char in enumerate(text):
+            # Check if this is a leet character
+            if char in '@!$+':
+                # Always unleet special chars
+                result.append(self._unleet_char(char))
+            elif char in '0134578' and i > 0 and i < len(text) - 1:
+                # Only unleet digits if they're surrounded by letters (leet within word)
+                prev_is_alpha = i > 0 and text[i-1].isalpha()
+                next_is_alpha = i < len(text) - 1 and text[i+1].isalpha()
+                if prev_is_alpha or next_is_alpha:
+                    result.append(self._unleet_char(char))
+                else:
+                    result.append(char)
+            else:
+                result.append(char)
+        return ''.join(result)
     
     def _extract_base_candidates(self, password: str) -> List[Tuple[str, int, int]]:
         """
