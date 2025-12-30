@@ -366,6 +366,248 @@ def hashcat_append(word: str, max_length: int = 6) -> str:
     return " ".join(f"${c}" for c in word)
 
 # =============================================
+# JOHN THE RIPPER (JTR) RULE HELPERS
+# =============================================
+def jtr_prepend(word: str, max_length: int = 6) -> str:
+    """
+    Generate John the Ripper prepend rule.
+    Uses ^X for each character (reversed order for proper prepending).
+    Limited to max_length characters for practical rule efficiency.
+    """
+    if not is_ascii_safe(word) or len(word) > max_length or len(word) == 0:
+        return None
+    
+    # For single character, use ^X
+    if len(word) == 1:
+        return f"^{word}"
+    
+    # For multiple characters, use individual ^ commands (reversed for correct order)
+    # JtR uses same syntax as Hashcat for prepend
+    word_reversed = word[::-1]
+    return "".join(f"^{c}" for c in word_reversed)
+
+def jtr_append(word: str, max_length: int = 6) -> str:
+    """
+    Generate John the Ripper append rule.
+    Uses $X for each character (JtR standard).
+    Limited to max_length characters for practical rule efficiency.
+    """
+    if not is_ascii_safe(word) or len(word) > max_length or len(word) == 0:
+        return None
+    
+    # For single character, use $X
+    if len(word) == 1:
+        return f"${word}"
+    
+    # For multiple characters, use individual $ commands
+    # JtR uses same syntax as Hashcat for append
+    return "".join(f"${c}" for c in word)
+
+# =============================================
+# RULE FORMAT CONVERTER
+# =============================================
+class RuleConverter:
+    """
+    Convert between Hashcat and John the Ripper rule formats.
+    Handles compatible operations and documents limitations.
+    """
+    
+    # Operations that are identical between Hashcat and JtR
+    IDENTICAL_OPS = {
+        'l', 'u', 'c', 'C', 't', 'r', 'd',  # Case and duplication
+        '{', '}',  # Rotation
+        '[', ']',  # Remove first/last
+        'E',  # Title case
+    }
+    
+    # Character-based operations (same syntax)
+    CHAR_OPS = {'^', '$', 's', '@', 'i', 'o', 'D', 'T'}
+    
+    # Hashcat operations that don't have JtR equivalents
+    NO_JTR_EQUIVALENT = {
+        'L': 'bitwise shift left',
+        'R': 'bitwise shift right',
+    }
+    
+    @staticmethod
+    def hashcat_to_jtr(hashcat_rule: str) -> Optional[str]:
+        """
+        Convert a Hashcat rule to John the Ripper format.
+        Returns None if the rule contains operations without JtR equivalents.
+        Returns the converted rule string otherwise.
+        """
+        if not hashcat_rule:
+            return None
+        
+        # Split rule into individual operations (space-separated for Hashcat)
+        operations = hashcat_rule.split()
+        jtr_operations = []
+        
+        for op in operations:
+            if not op:
+                continue
+            
+            # Check for operations without JtR equivalents
+            if len(op) >= 1 and op[0] in RuleConverter.NO_JTR_EQUIVALENT:
+                # Skip unsupported operations
+                continue
+            
+            # Most operations are identical between Hashcat and JtR
+            # The main difference is that Hashcat uses spaces between operations
+            # while JtR concatenates them
+            jtr_operations.append(op)
+        
+        if not jtr_operations:
+            return None
+        
+        # JtR concatenates operations without spaces
+        return "".join(jtr_operations)
+    
+    @staticmethod
+    def is_compatible_with_jtr(hashcat_rule: str) -> bool:
+        """
+        Check if a Hashcat rule can be converted to JtR format.
+        Returns True if the rule only uses operations supported by both.
+        """
+        if not hashcat_rule:
+            return False
+        
+        operations = hashcat_rule.split()
+        for op in operations:
+            if not op:
+                continue
+            if len(op) >= 1 and op[0] in RuleConverter.NO_JTR_EQUIVALENT:
+                return False
+        
+        return True
+
+# =============================================
+# JOHN THE RIPPER RULE GENERATOR
+# =============================================
+class JohnTheRipperRuleGenerator:
+    """
+    Generate John the Ripper compatible password rules.
+    Provides feature parity with Hashcat where possible.
+    """
+    
+    def __init__(self, converter: RuleConverter = None):
+        self.converter = converter or RuleConverter()
+        self.generated_rules: List[str] = []
+    
+    def generate_prepend_rule(self, word: str, score: int = SCORE_PREPEND_APPEND) -> Optional[Tuple[int, str]]:
+        """Generate JtR prepend rule"""
+        rule = jtr_prepend(word)
+        if rule:
+            return (score, rule)
+        return None
+    
+    def generate_append_rule(self, word: str, score: int = SCORE_PREPEND_APPEND) -> Optional[Tuple[int, str]]:
+        """Generate JtR append rule"""
+        rule = jtr_append(word)
+        if rule:
+            return (score, rule)
+        return None
+    
+    def generate_surround_rule(self, prefix: str, suffix: str, score: int = SCORE_SURROUND) -> Optional[Tuple[int, str]]:
+        """Generate JtR rule that surrounds word with prefix and suffix"""
+        prep = jtr_prepend(prefix)
+        app = jtr_append(suffix)
+        if prep and app:
+            rule = f"{prep}{app}"
+            return (score, rule)
+        return None
+    
+    def generate_case_rules(self) -> List[Tuple[int, str]]:
+        """Generate basic case transformation rules for JtR"""
+        return [
+            (SCORE_BFS_BASE, "l"),      # lowercase
+            (SCORE_BFS_BASE, "u"),      # uppercase
+            (SCORE_BFS_BASE, "c"),      # capitalize
+            (SCORE_BFS_BASE, "C"),      # invert capitalize
+            (SCORE_BFS_BASE, "t"),      # toggle case
+            (SCORE_BFS_BASE, "r"),      # reverse
+            (SCORE_BFS_BASE, "d"),      # duplicate
+            (SCORE_BFS_BASE, "E"),      # title case
+        ]
+    
+    def generate_toggle_rules(self, positions: List[int] = None) -> List[Tuple[int, str]]:
+        """Generate toggle case at position rules"""
+        if positions is None:
+            positions = [0, 1, 2, 3, 4]
+        
+        rules = []
+        for pos in positions:
+            rule = f"T{pos}"
+            rules.append((SCORE_ROTATION_SWAP_MEDIUM, rule))
+        return rules
+    
+    def generate_rotation_rules(self) -> List[Tuple[int, str]]:
+        """Generate rotation rules for JtR"""
+        return [
+            (SCORE_ROTATION_SWAP_HIGH, "{"),      # rotate left
+            (SCORE_ROTATION_SWAP_HIGH, "}"),      # rotate right
+            (SCORE_ROTATION_SWAP_MEDIUM, "{{"),   # double rotate left
+            (SCORE_ROTATION_SWAP_MEDIUM, "}}"),   # double rotate right
+        ]
+    
+    def generate_leet_rules(self, word: str, max_substitutions: int = 2) -> List[Tuple[int, str]]:
+        """
+        Generate leet-speak JtR substitution rules for a word.
+        Uses 's' command for character substitution (same as Hashcat).
+        """
+        rules = []
+        word_lower = word.lower()
+        positions = [(i, c) for i, c in enumerate(word_lower) if c in LEET_MAP]
+        
+        if not positions:
+            return rules
+        
+        # Single substitutions
+        for _, char in positions:
+            for leet_char in LEET_MAP[char][:3]:  # Limit to top 3 leet variations
+                if len(leet_char) == 1:  # JtR only supports single char substitutions
+                    rule = f"s{char}{leet_char}"
+                    rules.append((SCORE_NUMERIC, rule))
+        
+        # Double substitutions (if enough positions)
+        if len(positions) >= 2 and max_substitutions >= 2:
+            for i in range(len(positions)):
+                for j in range(i + 1, min(i + 3, len(positions))):
+                    _, char1 = positions[i]
+                    _, char2 = positions[j]
+                    for leet1 in LEET_MAP[char1][:2]:
+                        if len(leet1) != 1:
+                            continue
+                        for leet2 in LEET_MAP[char2][:2]:
+                            if len(leet2) != 1:
+                                continue
+                            rule = f"s{char1}{leet1}s{char2}{leet2}"
+                            rules.append((SCORE_NUMERIC - 10000, rule))
+        
+        return rules
+    
+    def convert_from_hashcat_rules(self, hashcat_rules: List[Tuple[int, str]]) -> List[Tuple[int, str]]:
+        """
+        Convert a list of scored Hashcat rules to JtR format.
+        Only includes rules that are compatible with JtR.
+        """
+        jtr_rules = []
+        skipped_count = 0
+        
+        for score, hashcat_rule in hashcat_rules:
+            if self.converter.is_compatible_with_jtr(hashcat_rule):
+                jtr_rule = self.converter.hashcat_to_jtr(hashcat_rule)
+                if jtr_rule:
+                    jtr_rules.append((score, jtr_rule))
+            else:
+                skipped_count += 1
+        
+        if skipped_count > 0:
+            log.info(f"Skipped {skipped_count:,} Hashcat rules without JtR equivalents")
+        
+        return jtr_rules
+
+# =============================================
 # ADVANCED HASHCAT OPERATIONS
 # =============================================
 def hashcat_toggle_at_position(pos: int) -> str:
@@ -557,6 +799,7 @@ def generate_leet_rules(word: str, max_substitutions: int = 2) -> List[str]:
     """
     Generate leet-speak Hashcat substitution rules for a word.
     Uses 's' command for character substitution.
+    Only generates single-character substitutions (multi-char not supported).
     """
     rules = []
     word_lower = word.lower()
@@ -565,11 +808,13 @@ def generate_leet_rules(word: str, max_substitutions: int = 2) -> List[str]:
     if not positions:
         return rules
     
-    # Single substitutions
+    # Single substitutions (only single-character leet replacements)
     for _, char in positions:
         for leet_char in LEET_MAP[char]:
-            rule = f"s{char}{leet_char}"
-            rules.append(rule)
+            # Only use single-character substitutions
+            if len(leet_char) == 1:
+                rule = f"s{char}{leet_char}"
+                rules.append(rule)
     
     # Double substitutions (if enough positions)
     if len(positions) >= 2 and max_substitutions >= 2:
@@ -578,7 +823,13 @@ def generate_leet_rules(word: str, max_substitutions: int = 2) -> List[str]:
                 _, char1 = positions[i]
                 _, char2 = positions[j]
                 for leet1 in LEET_MAP[char1]:
+                    # Only use single-character substitutions
+                    if len(leet1) != 1:
+                        continue
                     for leet2 in LEET_MAP[char2]:
+                        # Only use single-character substitutions
+                        if len(leet2) != 1:
+                            continue
                         rule = f"s{char1}{leet1} s{char2}{leet2}"
                         rules.append(rule)
     
@@ -865,7 +1116,8 @@ class PasswordTrie:
 # =============================================
 class PasswordRuleMiner:
     def __init__(self, output_dir: Path, use_cache: bool = True, max_workers: int = None, 
-                 verbose: bool = False, custom_wordlists: Optional[List[Path]] = None):
+                 verbose: bool = False, custom_wordlists: Optional[List[Path]] = None,
+                 rule_format: str = "hashcat"):
         self.out = output_dir
         self.out.mkdir(parents=True, exist_ok=True)
         self.scored_rules = []
@@ -874,10 +1126,22 @@ class PasswordRuleMiner:
         self.suffix = Counter()
         self.usernames: Dict[str, List[str]] = defaultdict(list)
         
+        # Rule format configuration
+        self.rule_format = rule_format.lower()  # "hashcat", "john", or "both"
+        if self.rule_format not in ["hashcat", "john", "both"]:
+            log.warning(f"Unknown rule format '{rule_format}', defaulting to 'hashcat'")
+            self.rule_format = "hashcat"
+        
         # Advanced features
         self.trie = PasswordTrie()
         self.bfs_generator = BFSRuleGenerator(max_depth=3, include_advanced=True)
         self.rule_tracker = RuleEffectivenessTracker()
+        
+        # John the Ripper support
+        self.jtr_generator = JohnTheRipperRuleGenerator()
+        self.rule_converter = RuleConverter()
+        self.jtr_scored_rules = []  # Separate list for JtR rules
+        self._jtr_rules_lock = Lock()  # Thread-safe access to jtr_scored_rules
         
         # Custom wordlists
         self.custom_wordlists = custom_wordlists or []
@@ -941,6 +1205,11 @@ class PasswordRuleMiner:
         """Thread-safe method to add scored rules"""
         with self._rules_lock:
             self.scored_rules.extend(rules)
+    
+    def _add_jtr_scored_rules(self, rules: List[Tuple[int, str]]):
+        """Thread-safe method to add JtR scored rules"""
+        with self._jtr_rules_lock:
+            self.jtr_scored_rules.extend(rules)
     
     def _load_custom_wordlists(self):
         """Load custom wordlists from provided files"""
@@ -1191,20 +1460,38 @@ class PasswordRuleMiner:
                 low = part.lower()
                 cap = part.capitalize()
 
-                # Prepend username (reversed) - max 6 chars enforced in hashcat_prepend
-                prep_low = hashcat_prepend(low)
-                prep_cap = hashcat_prepend(cap)
-                app_low = hashcat_append(low)
-                app_cap = hashcat_append(cap)
+                # Generate Hashcat rules
+                if self.rule_format in ["hashcat", "both"]:
+                    # Prepend username (reversed) - max 6 chars enforced in hashcat_prepend
+                    prep_low = hashcat_prepend(low)
+                    prep_cap = hashcat_prepend(cap)
+                    app_low = hashcat_append(low)
+                    app_cap = hashcat_append(cap)
+                    
+                    if prep_low:
+                        self.scored_rules.append((SCORE_USER_CONTEXT_HIGH, prep_low))
+                    if prep_cap:
+                        self.scored_rules.append((SCORE_USER_CONTEXT_MEDIUM, prep_cap))
+                    if app_low:
+                        self.scored_rules.append((SCORE_USER_CONTEXT_MEDIUM, app_low))
+                    if app_cap:
+                        self.scored_rules.append((SCORE_USER_CONTEXT_LOW, app_cap))
                 
-                if prep_low:
-                    self.scored_rules.append((SCORE_USER_CONTEXT_HIGH, prep_low))
-                if prep_cap:
-                    self.scored_rules.append((SCORE_USER_CONTEXT_MEDIUM, prep_cap))
-                if app_low:
-                    self.scored_rules.append((SCORE_USER_CONTEXT_MEDIUM, app_low))
-                if app_cap:
-                    self.scored_rules.append((SCORE_USER_CONTEXT_LOW, app_cap))
+                # Generate JtR rules
+                if self.rule_format in ["john", "both"]:
+                    jtr_prep_low = self.jtr_generator.generate_prepend_rule(low, SCORE_USER_CONTEXT_HIGH)
+                    jtr_prep_cap = self.jtr_generator.generate_prepend_rule(cap, SCORE_USER_CONTEXT_MEDIUM)
+                    jtr_app_low = self.jtr_generator.generate_append_rule(low, SCORE_USER_CONTEXT_MEDIUM)
+                    jtr_app_cap = self.jtr_generator.generate_append_rule(cap, SCORE_USER_CONTEXT_LOW)
+                    
+                    if jtr_prep_low:
+                        self.jtr_scored_rules.append(jtr_prep_low)
+                    if jtr_prep_cap:
+                        self.jtr_scored_rules.append(jtr_prep_cap)
+                    if jtr_app_low:
+                        self.jtr_scored_rules.append(jtr_app_low)
+                    if jtr_app_cap:
+                        self.jtr_scored_rules.append(jtr_app_cap)
 
                 context_count += 1
 
@@ -1926,6 +2213,44 @@ class PasswordRuleMiner:
         log.info(f" → 00_trie_bases.txt ({len(quality_bases[:5_000_000]):,} bases)")
         
         return quality_bases, common_prefixes
+    
+    def generate_jtr_specific_rules(self):
+        """
+        Generate John the Ripper-specific rules that don't come from Hashcat conversion.
+        Includes JtR-specific operations and optimizations.
+        """
+        if self.rule_format not in ["john", "both"]:
+            return
+        
+        log.info("Generating JtR-specific rules...")
+        
+        # Generate basic case transformation rules
+        case_rules = self.jtr_generator.generate_case_rules()
+        self.jtr_scored_rules.extend(case_rules)
+        
+        # Generate toggle rules
+        toggle_rules = self.jtr_generator.generate_toggle_rules([0, 1, 2, 3, 4, 5])
+        self.jtr_scored_rules.extend(toggle_rules)
+        
+        # Generate rotation rules
+        rotation_rules = self.jtr_generator.generate_rotation_rules()
+        self.jtr_scored_rules.extend(rotation_rules)
+        
+        # Generate leet-speak rules for common base words
+        if self.passwords:
+            word_counter = Counter()
+            for pwd in self.passwords[:10000]:  # Sample first 10k passwords
+                cleaned = re.sub(r'[^a-zA-Z]', '', pwd.lower())
+                if 4 <= len(cleaned) <= 12:
+                    word_counter[cleaned] += 1
+            
+            # Generate leet rules for top words
+            for word, _ in word_counter.most_common(100):
+                leet_rules = self.jtr_generator.generate_leet_rules(word)
+                self.jtr_scored_rules.extend(leet_rules)
+        
+        log.info(f"Generated {len(case_rules) + len(toggle_rules) + len(rotation_rules):,} JtR-specific rules")
+    
     def write_username_wordlist(self):
         """
         Write a wordlist of unique usernames to a file.
@@ -1938,17 +2263,69 @@ class PasswordRuleMiner:
     
     def write_rules(self):
         log.info("Writing rule files...")
-        self.scored_rules.sort(key=lambda x: x[0], reverse=True)
-        seen = set()
-        unique_rules = [r for _, r in self.scored_rules if r not in seen and not seen.add(r)]
+        
+        # Write Hashcat rules if requested
+        if self.rule_format in ["hashcat", "both"]:
+            log.info("Generating Hashcat rule files...")
+            self.scored_rules.sort(key=lambda x: x[0], reverse=True)
+            seen = set()
+            unique_rules = [r for _, r in self.scored_rules if r not in seen and not seen.add(r)]
 
-        def write_file(path, data):
-            path.write_text("\n".join(data) + "\n", encoding="utf-8")
-            log.info(f" → {path.name} ({len(data):,} lines)")
+            def write_file(path, data):
+                path.write_text("\n".join(data) + "\n", encoding="utf-8")
+                log.info(f" → {path.name} ({len(data):,} lines)")
 
-        write_file(self.out / "01_elite.rule", unique_rules[:15_000])
-        write_file(self.out / "02_extended_50k.rule", unique_rules[:50_000])
-        write_file(self.out / "03_complete.rule", unique_rules)
+            write_file(self.out / "01_elite.rule", unique_rules[:15_000])
+            write_file(self.out / "02_extended_50k.rule", unique_rules[:50_000])
+            write_file(self.out / "03_complete.rule", unique_rules)
+        
+        # Write John the Ripper rules if requested
+        if self.rule_format in ["john", "both"]:
+            log.info("Generating John the Ripper rule files...")
+            
+            # If we're in "john" mode only, convert all Hashcat rules
+            if self.rule_format == "john":
+                log.info("Converting Hashcat rules to JtR format...")
+                self.jtr_scored_rules = self.jtr_generator.convert_from_hashcat_rules(self.scored_rules)
+            
+            # Sort and deduplicate JtR rules
+            self.jtr_scored_rules.sort(key=lambda x: x[0], reverse=True)
+            seen_jtr = set()
+            unique_jtr_rules = [r for _, r in self.jtr_scored_rules if r not in seen_jtr and not seen_jtr.add(r)]
+            
+            def write_jtr_file(path, data):
+                path.write_text("\n".join(data) + "\n", encoding="utf-8")
+                log.info(f" → {path.name} ({len(data):,} lines)")
+            
+            write_jtr_file(self.out / "01_elite.john", unique_jtr_rules[:15_000])
+            write_jtr_file(self.out / "02_extended_50k.john", unique_jtr_rules[:50_000])
+            write_jtr_file(self.out / "03_complete.john", unique_jtr_rules)
+            
+            # Write a limitations file documenting what was skipped
+            if self.rule_format == "john":
+                skipped = len(self.scored_rules) - len(self.jtr_scored_rules)
+                if skipped > 0:
+                    limitations = f"""John the Ripper Rule Generation - Limitations Report
+                    
+Generated: {datetime.now():%Y-%m-%d %H:%M:%S}
+
+Total Hashcat rules: {len(self.scored_rules):,}
+Compatible JtR rules: {len(self.jtr_scored_rules):,}
+Skipped rules: {skipped:,}
+
+Rules that were skipped contain Hashcat-specific operations without JtR equivalents:
+- L (bitwise shift left)
+- R (bitwise shift right)
+
+These operations are specific to Hashcat and don't have direct equivalents in John the Ripper.
+All other rule operations have been successfully converted to JtR format.
+
+For maximum compatibility, use --rules both to generate rules for both Hashcat and JtR.
+"""
+                    limitations_file = self.out / "jtr_limitations.txt"
+                    limitations_file.write_text(limitations, encoding="utf-8")
+                    log.info(f" → jtr_limitations.txt (limitations documentation)")
+
 
     def generate_masks_and_years(self):
         log.info("Generating masks and year/season rules...")
@@ -2019,6 +2396,10 @@ Top suffixes: {', '.join(k for k, _ in self.suffix.most_common(15))}
         self.generate_bfs_complex_rules()
         self.generate_trie_based_bases()
         
+        # NEW: John the Ripper specific rules
+        if self.rule_format in ["john", "both"]:
+            self.generate_jtr_specific_rules()
+        
         # NEW: Custom wordlist rules
         if self.custom_words:
             self.generate_custom_wordlist_rules()
@@ -2080,6 +2461,9 @@ def main():
                         help="Custom wordlist file(s) for enhanced base generation")
     parser.add_argument("-v", "--verbose", action="store_true", 
                         help="Enable verbose/debug mode with detailed logging")
+    parser.add_argument("--rules", type=str, default="hashcat", 
+                        choices=["hashcat", "john", "both"],
+                        help="Output rule format: 'hashcat' (default), 'john' (John the Ripper), or 'both'")
     args = parser.parse_args()
     
     # Handle cache clearing
@@ -2103,6 +2487,14 @@ def main():
     max_workers = args.max_workers if args.max_workers else MAX_WORKERS
     log.info(f"Parallel processing enabled with {max_workers} workers")
     
+    # Display rule format selection
+    if args.rules == "hashcat":
+        log.info("Generating Hashcat rules only")
+    elif args.rules == "john":
+        log.info("Generating John the Ripper rules only")
+    else:
+        log.info("Generating both Hashcat and John the Ripper rules")
+    
     # Process custom wordlists if provided
     custom_wordlists = []
     if args.wordlist:
@@ -2117,7 +2509,8 @@ def main():
         use_cache=use_cache, 
         max_workers=max_workers,
         verbose=args.verbose,
-        custom_wordlists=custom_wordlists
+        custom_wordlists=custom_wordlists,
+        rule_format=args.rules
     )
     miner.mine_potfiles(pot_files)
     if hash_files:
