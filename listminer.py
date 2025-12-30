@@ -256,6 +256,15 @@ LEET_PATTERNS = {
     'internet': ['1nternet', 'intern3t', '1ntern3t'],
 }
 
+# Leet rule scoring constants
+LEET_SCORE_PATTERN_MATCH = 1_000_000      # Real-world pattern matches (highest priority)
+LEET_SCORE_HIGH_PRIORITY = 800_000        # Common single substitutions (a→@, e→3, o→0)
+LEET_SCORE_MEDIUM_PRIORITY = 600_000      # Common single substitutions (secondary)
+LEET_SCORE_LOW_PRIORITY = 400_000         # Less common single substitutions
+LEET_SCORE_DOUBLE_HIGH = 500_000          # Double substitutions with common chars
+LEET_SCORE_DOUBLE_MEDIUM = 300_000        # Double substitutions (standard)
+LEET_SCORE_TRIPLE = 200_000               # Triple substitutions
+
 def generate_leet_rules(word: str, max_substitutions: int = 3) -> List[Tuple[int, str]]:
     """
     Generate prioritized leet-speak Hashcat substitution rules for a word.
@@ -286,28 +295,27 @@ def generate_leet_rules(word: str, max_substitutions: int = 3) -> List[Tuple[int
             if rule_parts:
                 rule = " ".join(rule_parts)
                 # Real-world patterns get highest score
-                rules.append((1_000_000, rule))
+                rules.append((LEET_SCORE_PATTERN_MATCH, rule))
     
     # Find all positions that can be leet-substituted
-    positions = [(i, c) for i, c in enumerate(word_lower) if c.lower() in LEET_MAP]
+    positions = [(i, c) for i, c in enumerate(word_lower) if c in LEET_MAP]
     
     if not positions:
         return rules
     
     # Single substitutions (high probability)
     for pos, char in positions:
-        char_lower = char.lower()
-        for leet_char in LEET_MAP[char_lower]:
+        for leet_char in LEET_MAP[char]:
             # Only use ASCII-safe characters for Hashcat compatibility
             if is_ascii_safe(leet_char) and len(leet_char) == 1:
-                rule = f"s{char_lower}{leet_char}"
+                rule = f"s{char}{leet_char}"
                 # Score based on common usage (a→@, e→3, o→0 most common)
                 if leet_char in ['@', '3', '0', '$', '1']:
-                    score = 800_000
+                    score = LEET_SCORE_HIGH_PRIORITY
                 elif leet_char in ['4', '5', '7', '!']:
-                    score = 600_000
+                    score = LEET_SCORE_MEDIUM_PRIORITY
                 else:
-                    score = 400_000
+                    score = LEET_SCORE_LOW_PRIORITY
                 rules.append((score, rule))
     
     # Double substitutions (medium probability)
@@ -316,22 +324,20 @@ def generate_leet_rules(word: str, max_substitutions: int = 3) -> List[Tuple[int
             for j in range(i + 1, min(i + 5, len(positions))):
                 _, char1 = positions[i]
                 _, char2 = positions[j]
-                char1_lower = char1.lower()
-                char2_lower = char2.lower()
                 
-                for leet1 in LEET_MAP[char1_lower]:
+                for leet1 in LEET_MAP[char1]:
                     if not is_ascii_safe(leet1) or len(leet1) != 1:
                         continue
-                    for leet2 in LEET_MAP[char2_lower]:
+                    for leet2 in LEET_MAP[char2]:
                         if not is_ascii_safe(leet2) or len(leet2) != 1:
                             continue
                         
-                        rule = f"s{char1_lower}{leet1} s{char2_lower}{leet2}"
+                        rule = f"s{char1}{leet1} s{char2}{leet2}"
                         # Common double substitutions get higher scores
-                        if (char1_lower == 'a' and leet1 == '@') or (char2_lower == 'o' and leet2 == '0'):
-                            score = 500_000
+                        if (char1 == 'a' and leet1 == '@') or (char2 == 'o' and leet2 == '0'):
+                            score = LEET_SCORE_DOUBLE_HIGH
                         else:
-                            score = 300_000
+                            score = LEET_SCORE_DOUBLE_MEDIUM
                         rules.append((score, rule))
     
     # Triple substitutions (lower probability, but comprehensive)
@@ -342,9 +348,6 @@ def generate_leet_rules(word: str, max_substitutions: int = 3) -> List[Tuple[int
                     _, char1 = positions[i]
                     _, char2 = positions[j]
                     _, char3 = positions[k]
-                    char1_lower = char1.lower()
-                    char2_lower = char2.lower()
-                    char3_lower = char3.lower()
                     
                     # Only use most common leet chars for triple substitutions
                     common_leet = {
@@ -352,12 +355,12 @@ def generate_leet_rules(word: str, max_substitutions: int = 3) -> List[Tuple[int
                         'o': ['0'], 's': ['$', '5'], 't': ['7']
                     }
                     
-                    if char1_lower in common_leet and char2_lower in common_leet and char3_lower in common_leet:
-                        for leet1 in common_leet[char1_lower]:
-                            for leet2 in common_leet[char2_lower]:
-                                for leet3 in common_leet[char3_lower]:
-                                    rule = f"s{char1_lower}{leet1} s{char2_lower}{leet2} s{char3_lower}{leet3}"
-                                    score = 200_000
+                    if char1 in common_leet and char2 in common_leet and char3 in common_leet:
+                        for leet1 in common_leet[char1]:
+                            for leet2 in common_leet[char2]:
+                                for leet3 in common_leet[char3]:
+                                    rule = f"s{char1}{leet1} s{char2}{leet2} s{char3}{leet3}"
+                                    score = LEET_SCORE_TRIPLE
                                     rules.append((score, rule))
     
     return rules
