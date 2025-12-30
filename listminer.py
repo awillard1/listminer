@@ -9,6 +9,10 @@ Features:
 - Generates Hashcat prepend/append rules, masks, and year/season rules
 - Fully compatible with complex usernames and special characters
 - Robust logging for every processed file and generation step
+- Levenshtein distance-based scoring for transformation effort
+- Advanced Hashcat operations (T, L, R, swap, insert, etc.)
+- Custom wordlist integration with spell-checking
+- Statistical analysis and rule pruning
 """
 import argparse
 import hashlib
@@ -19,7 +23,7 @@ import re
 import signal
 import sys
 from collections import Counter, defaultdict, deque
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, ProcessPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from threading import Lock
@@ -77,6 +81,132 @@ def sigint_handler(signum, frame):
     log.warning("\nInterrupted by user — exiting cleanly")
     sys.exit(0)
 signal.signal(signal.SIGINT, sigint_handler)
+
+# =============================================
+# SPELL-CHECKING LIBRARY (OPTIONAL)
+# =============================================
+try:
+    import enchant
+    ENCHANT_AVAILABLE = True
+except ImportError:
+    ENCHANT_AVAILABLE = False
+
+# =============================================
+# LEVENSHTEIN DISTANCE
+# =============================================
+def levenshtein_distance(s1: str, s2: str) -> int:
+    """
+    Calculate the Levenshtein distance between two strings.
+    This represents the minimum number of single-character edits
+    (insertions, deletions, or substitutions) required to change one string into another.
+    
+    Used for scoring transformation effort between password candidates.
+    """
+    if len(s1) < len(s2):
+        return levenshtein_distance(s2, s1)
+    
+    if len(s2) == 0:
+        return len(s1)
+    
+    previous_row = range(len(s2) + 1)
+    for i, c1 in enumerate(s1):
+        current_row = [i + 1]
+        for j, c2 in enumerate(s2):
+            # Cost of insertions, deletions, or substitutions
+            insertions = previous_row[j + 1] + 1
+            deletions = current_row[j] + 1
+            substitutions = previous_row[j] + (c1 != c2)
+            current_row.append(min(insertions, deletions, substitutions))
+        previous_row = current_row
+    
+    return previous_row[-1]
+
+def score_transformation_effort(base: str, password: str) -> int:
+    """
+    Score the transformation effort from base to password using Levenshtein distance.
+    Lower scores indicate easier transformations (more effective rules).
+    """
+    return levenshtein_distance(base.lower(), password.lower())
+
+# =============================================
+# RULE EFFECTIVENESS TRACKING
+# =============================================
+class RuleEffectivenessTracker:
+    """
+    Track and analyze the effectiveness of generated rules.
+    Provides statistical analysis and pruning capabilities.
+    """
+    
+    def __init__(self):
+        self.rule_stats: Dict[str, Dict] = defaultdict(lambda: {
+            'count': 0,
+            'total_score': 0,
+            'transformations': [],
+            'levenshtein_sum': 0
+        })
+        self.transformation_history: List[Tuple[str, str, str, int]] = []
+    
+    def record_transformation(self, base: str, password: str, rule: str, score: int):
+        """Record a successful transformation"""
+        lev_dist = levenshtein_distance(base, password)
+        
+        self.rule_stats[rule]['count'] += 1
+        self.rule_stats[rule]['total_score'] += score
+        self.rule_stats[rule]['levenshtein_sum'] += lev_dist
+        
+        # Limit transformation history to prevent memory issues
+        if len(self.rule_stats[rule]['transformations']) < 10:
+            self.rule_stats[rule]['transformations'].append((base, password))
+        
+        self.transformation_history.append((base, password, rule, lev_dist))
+    
+    def get_rule_effectiveness(self, rule: str) -> float:
+        """Calculate effectiveness score for a rule"""
+        stats = self.rule_stats[rule]
+        if stats['count'] == 0:
+            return 0.0
+        
+        avg_score = stats['total_score'] / stats['count']
+        avg_levenshtein = stats['levenshtein_sum'] / stats['count']
+        
+        # Effective rules have high scores and low transformation effort
+        effectiveness = avg_score / (1 + avg_levenshtein)
+        return effectiveness
+    
+    def prune_ineffective_rules(self, rules: List[Tuple[int, str]], min_effectiveness: float = 100.0) -> List[Tuple[int, str]]:
+        """Prune rules that don't meet minimum effectiveness threshold"""
+        pruned = []
+        for score, rule in rules:
+            effectiveness = self.get_rule_effectiveness(rule)
+            if effectiveness >= min_effectiveness or rule not in self.rule_stats:
+                pruned.append((score, rule))
+        return pruned
+    
+    def get_statistics_report(self) -> str:
+        """Generate a statistical report of rule effectiveness"""
+        if not self.rule_stats:
+            return "No rule statistics available."
+        
+        sorted_rules = sorted(
+            self.rule_stats.items(),
+            key=lambda x: self.get_rule_effectiveness(x[0]),
+            reverse=True
+        )
+        
+        report = ["Rule Effectiveness Statistics:", "=" * 50]
+        report.append(f"Total unique rules tracked: {len(self.rule_stats)}")
+        report.append(f"Total transformations: {len(self.transformation_history)}")
+        report.append("")
+        report.append("Top 20 Most Effective Rules:")
+        report.append("-" * 50)
+        
+        for i, (rule, stats) in enumerate(sorted_rules[:20], 1):
+            effectiveness = self.get_rule_effectiveness(rule)
+            avg_lev = stats['levenshtein_sum'] / stats['count'] if stats['count'] > 0 else 0
+            report.append(f"{i:2d}. Rule: {rule[:50]}")
+            report.append(f"    Count: {stats['count']}, Effectiveness: {effectiveness:.2f}, Avg Levenshtein: {avg_lev:.2f}")
+        
+        return "\n".join(report)
 
 # =============================================
 # FILE CACHE
@@ -209,6 +339,132 @@ def hashcat_append(word: str, max_length: int = 6) -> str:
     return " ".join(f"${c}" for c in word)
 
 # =============================================
+# ADVANCED HASHCAT OPERATIONS
+# =============================================
+def hashcat_toggle_at_position(pos: int) -> str:
+    """Generate Hashcat rule to toggle case at specific position (TN)"""
+    return f"T{pos}"
+
+def hashcat_bitwise_shift_left() -> str:
+    """Generate Hashcat rule for bitwise shift left (L)"""
+    return "L"
+
+def hashcat_bitwise_shift_right() -> str:
+    """Generate Hashcat rule for bitwise shift right (R)"""
+    return "R"
+
+def hashcat_swap_positions(pos1: int, pos2: int) -> str:
+    """Generate Hashcat rule to swap characters at two positions (*NM)"""
+    return f"*{pos1}{pos2}"
+
+def hashcat_insert_at_position(pos: int, char: str) -> str:
+    """Generate Hashcat rule to insert character at position (iNX)"""
+    if not is_ascii_safe(char) or len(char) != 1:
+        return None
+    return f"i{pos}{char}"
+
+def hashcat_overwrite_at_position(pos: int, char: str) -> str:
+    """Generate Hashcat rule to overwrite character at position (oNX)"""
+    if not is_ascii_safe(char) or len(char) != 1:
+        return None
+    return f"o{pos}{char}"
+
+def hashcat_delete_at_position(pos: int) -> str:
+    """Generate Hashcat rule to delete character at position (DN)"""
+    return f"D{pos}"
+
+def hashcat_extract_range(start: int, length: int) -> str:
+    """Generate Hashcat rule to extract substring (xNM)"""
+    return f"x{start}{length}"
+
+def hashcat_purge_character(char: str) -> str:
+    """Generate Hashcat rule to purge all instances of character (@X)"""
+    if not is_ascii_safe(char) or len(char) != 1:
+        return None
+    return f"@{char}"
+
+def generate_advanced_swap_rules(common_positions: List[int] = [0, 1, 2, -1, -2]) -> List[str]:
+    """
+    Generate advanced multi-character swap rules.
+    Swaps characters at common positions to create password variants.
+    """
+    rules = []
+    for i, pos1 in enumerate(common_positions):
+        for pos2 in common_positions[i+1:]:
+            # Hashcat uses positive indices only
+            if pos1 >= 0 and pos2 >= 0:
+                rules.append(hashcat_swap_positions(pos1, pos2))
+    return rules
+
+def generate_numeric_sequence_rules() -> List[str]:
+    """
+    Generate rules for numeric sequence manipulation.
+    Includes common patterns like incrementing, decrementing, and replacing sequences.
+    """
+    rules = []
+    
+    # Common number sequences to append/prepend
+    sequences = ['123', '1234', '321', '12345', '456', '789', '000', '111']
+    for seq in sequences:
+        # Append sequence
+        app = hashcat_append(seq)
+        if app:
+            rules.append(app)
+        
+        # Prepend sequence
+        prep = hashcat_prepend(seq)
+        if prep:
+            rules.append(prep)
+    
+    # Replace numbers with other numbers (common patterns)
+    number_substitutions = [
+        ('0', '1'), ('1', '2'), ('2', '3'),
+        ('0', '!'), ('1', '!'), 
+        ('9', '0'), ('8', '9'),
+    ]
+    for old, new in number_substitutions:
+        rules.append(f"s{old}{new}")
+    
+    return rules
+
+def generate_combined_prepend_append_rules(
+    prefixes: List[str], 
+    suffixes: List[str], 
+    case_transforms: List[str] = ['l', 'c', 'u']
+) -> List[str]:
+    """
+    Generate combined prepend/append rules with case transformations.
+    Creates comprehensive mutation rules combining multiple operations.
+    """
+    rules = []
+    
+    for prefix in prefixes[:20]:  # Limit to top 20 for performance
+        if not is_ascii_safe(prefix) or len(prefix) > 4:
+            continue
+            
+        prep = hashcat_prepend(prefix)
+        if not prep:
+            continue
+            
+        for suffix in suffixes[:20]:
+            if not is_ascii_safe(suffix) or len(suffix) > 4:
+                continue
+                
+            app = hashcat_append(suffix)
+            if not app:
+                continue
+            
+            # Basic combination
+            rules.append(f"{prep} {app}")
+            
+            # With case transformations
+            for case_op in case_transforms:
+                rules.append(f"{case_op} {prep} {app}")
+                rules.append(f"{prep} {case_op} {app}")
+    
+    return rules
+
+# =============================================
 # ADVANCED FEATURES: LEET MAPPING
 # =============================================
 LEET_MAP = {
@@ -261,6 +517,7 @@ class BFSRuleGenerator:
     """
     Generate complex Hashcat rules using BFS exploration.
     Combines multiple operations in sequence for comprehensive coverage.
+    Enhanced with advanced operations: swaps, rotations, insertions.
     """
     
     # Basic Hashcat operations (including Hashcat 7+ features)
@@ -275,10 +532,23 @@ class BFSRuleGenerator:
         ('d', 'duplicate'),
         ('{', 'rotate left'),
         ('}', 'rotate right'),
+        ('L', 'bitwise shift left'),  # Advanced
+        ('R', 'bitwise shift right'),  # Advanced
     ]
     
-    def __init__(self, max_depth: int = 3):
+    # Advanced positional operations
+    POSITIONAL_OPS = [
+        ('T0', 'toggle case at position 0'),
+        ('T1', 'toggle case at position 1'),
+        ('D0', 'delete at position 0'),
+        ('*01', 'swap positions 0 and 1'),
+        ('*02', 'swap positions 0 and 2'),
+        ('*12', 'swap positions 1 and 2'),
+    ]
+    
+    def __init__(self, max_depth: int = 3, include_advanced: bool = True):
         self.max_depth = max_depth
+        self.include_advanced = include_advanced
         self.rules: Set[str] = set()
     
     def generate(self, base_ops: Optional[List[str]] = None) -> List[Tuple[int, str]]:
@@ -287,7 +557,11 @@ class BFSRuleGenerator:
         Returns list of (score, rule) tuples.
         """
         if base_ops is None:
-            base_ops = [op[0] for op in self.OPERATIONS[:6]]  # First 6 ops
+            base_ops = [op[0] for op in self.OPERATIONS[:10]]  # Use more operations
+            
+            # Add positional operations if advanced mode
+            if self.include_advanced:
+                base_ops.extend([op[0] for op in self.POSITIONAL_OPS[:3]])
         
         scored_rules = []
         queue = deque([("", 0)])  # (rule, depth)
@@ -310,6 +584,39 @@ class BFSRuleGenerator:
                 if new_rule not in seen:
                     seen.add(new_rule)
                     queue.append((new_rule, depth + 1))
+        
+        return scored_rules
+    
+    def generate_rotation_swap_combos(self) -> List[Tuple[int, str]]:
+        """
+        Generate specialized rules combining rotations and swaps.
+        These create interesting password variants.
+        """
+        scored_rules = []
+        
+        # Rotation combinations
+        rotation_ops = ['{', '}', '{{', '}}']  # Single and double rotations
+        for rot in rotation_ops:
+            scored_rules.append((400_000, rot))
+            
+            # Rotation with case changes
+            for case_op in ['l', 'c', 'u']:
+                scored_rules.append((380_000, f"{rot} {case_op}"))
+                scored_rules.append((375_000, f"{case_op} {rot}"))
+        
+        # Swap combinations
+        swap_rules = generate_advanced_swap_rules([0, 1, 2, 3])
+        for swap in swap_rules:
+            scored_rules.append((390_000, swap))
+            
+            # Swap with case changes
+            scored_rules.append((370_000, f"{swap} l"))
+            scored_rules.append((365_000, f"{swap} c"))
+        
+        # Combined rotations and swaps
+        for rot in ['{', '}']:
+            for swap in swap_rules[:3]:  # Limit combinations
+                scored_rules.append((350_000, f"{rot} {swap}"))
         
         return scored_rules
     
@@ -483,7 +790,8 @@ class PasswordTrie:
 # MAIN CLASS — PASSWORD RULE MINER
 # =============================================
 class PasswordRuleMiner:
-    def __init__(self, output_dir: Path, use_cache: bool = True, max_workers: int = None):
+    def __init__(self, output_dir: Path, use_cache: bool = True, max_workers: int = None, 
+                 verbose: bool = False, custom_wordlists: Optional[List[Path]] = None):
         self.out = output_dir
         self.out.mkdir(parents=True, exist_ok=True)
         self.scored_rules = []
@@ -494,7 +802,21 @@ class PasswordRuleMiner:
         
         # Advanced features
         self.trie = PasswordTrie()
-        self.bfs_generator = BFSRuleGenerator(max_depth=3)
+        self.bfs_generator = BFSRuleGenerator(max_depth=3, include_advanced=True)
+        self.rule_tracker = RuleEffectivenessTracker()
+        
+        # Custom wordlists
+        self.custom_wordlists = custom_wordlists or []
+        self.custom_words: Set[str] = set()
+        
+        # Spell checker (if available)
+        self.spell_checker = None
+        if ENCHANT_AVAILABLE:
+            try:
+                self.spell_checker = enchant.Dict("en_US")
+                log.info("Spell-checking enabled (enchant library available)")
+            except Exception as e:
+                log.warning(f"Spell-checker initialization failed: {e}")
         
         # Caching
         cache_dir = self.out / ".listminer_cache"
@@ -504,12 +826,22 @@ class PasswordRuleMiner:
         # Parallel processing configuration
         self.max_workers = max_workers if max_workers is not None else MAX_WORKERS
         self._rules_lock = Lock()  # Thread-safe access to scored_rules
+        
+        # Verbose/debug mode
+        self.verbose = verbose
+        if self.verbose:
+            log.setLevel(logging.DEBUG)
+            log.debug("Verbose mode enabled")
 
         # ======= Fix: Compile the USER_PATTERNS =======
         self.COMPILED_USER_RE = [re.compile(p) for p in self.USER_PATTERNS]
 
         # Email cleanup regex
         self.EMAIL_RE = re.compile(r'^([^@]+)@.+$')
+        
+        # Load custom wordlists if provided
+        if self.custom_wordlists:
+            self._load_custom_wordlists()
 
     # -------------------------------
     # File parsing
@@ -535,6 +867,79 @@ class PasswordRuleMiner:
         """Thread-safe method to add scored rules"""
         with self._rules_lock:
             self.scored_rules.extend(rules)
+    
+    def _load_custom_wordlists(self):
+        """Load custom wordlists from provided files"""
+        log.info("Loading custom wordlists...")
+        total_words = 0
+        
+        for wordlist_path in self.custom_wordlists:
+            try:
+                with wordlist_path.open('r', encoding='utf-8', errors='ignore') as f:
+                    for line in f:
+                        word = line.strip()
+                        if 3 <= len(word) <= 20 and word.isalpha():
+                            self.custom_words.add(word.lower())
+                            total_words += 1
+            except Exception as e:
+                log.warning(f"Failed to load wordlist {wordlist_path}: {e}")
+        
+        log.info(f"Loaded {total_words:,} words from {len(self.custom_wordlists)} custom wordlist(s)")
+        log.info(f"Unique words in custom wordlists: {len(self.custom_words):,}")
+    
+    def generate_spell_checked_suggestions(self, base_words: List[str], limit: int = 1000) -> List[str]:
+        """
+        Generate password suggestions using spell-checking library.
+        Returns similar words that might be used as password bases.
+        """
+        if not self.spell_checker:
+            return []
+        
+        suggestions = set()
+        
+        for word in base_words[:limit]:
+            if not word or len(word) < 4:
+                continue
+            
+            try:
+                # Check if word is misspelled
+                if not self.spell_checker.check(word):
+                    # Get suggestions
+                    word_suggestions = self.spell_checker.suggest(word)[:3]
+                    for suggestion in word_suggestions:
+                        if 4 <= len(suggestion) <= 15:
+                            suggestions.add(suggestion.lower())
+                
+                # Also add the word itself if it's valid
+                if self.spell_checker.check(word):
+                    suggestions.add(word.lower())
+            except Exception as e:
+                if self.verbose:
+                    log.debug(f"Spell-check error for '{word}': {e}")
+        
+        return list(suggestions)
+    
+    def generate_custom_wordlist_rules(self):
+        """Generate rules based on custom wordlists"""
+        if not self.custom_words:
+            if self.verbose:
+                log.debug("No custom words loaded, skipping custom wordlist rules")
+            return
+        
+        log.info("Generating rules from custom wordlists...")
+        
+        # Generate prepend/append rules from custom words
+        for word in list(self.custom_words)[:500]:  # Limit for performance
+            if len(word) <= 6:
+                prep = hashcat_prepend(word)
+                app = hashcat_append(word)
+                
+                if prep:
+                    self.scored_rules.append((200_000, prep))
+                if app:
+                    self.scored_rules.append((200_000, app))
+        
+        log.info(f"Generated rules from {min(500, len(self.custom_words))} custom words")
     
     def mine_potfiles(self, files: Iterable[Path]):
         total = 0
@@ -1332,13 +1737,18 @@ class PasswordRuleMiner:
         log.info(f"Generated {leet_count:,} leet-speak mutation rules")
     
     def generate_bfs_complex_rules(self):
-        """Generate complex rules using BFS exploration"""
-        log.info("Generating BFS-based complex rules...")
+        """Generate complex rules using BFS exploration with advanced operations"""
+        log.info("Generating BFS-based complex rules with advanced operations...")
         
         # Generate basic BFS rules
         bfs_rules = self.bfs_generator.generate()
         self.scored_rules.extend(bfs_rules)
         log.info(f"Generated {len(bfs_rules):,} BFS exploration rules")
+        
+        # Generate rotation and swap combinations
+        rotation_swap_rules = self.bfs_generator.generate_rotation_swap_combos()
+        self.scored_rules.extend(rotation_swap_rules)
+        log.info(f"Generated {len(rotation_swap_rules):,} rotation/swap combination rules")
         
         # Generate BFS combinations with common strings (ASCII only)
         common_strings = [s for s, _ in self.suffix.most_common(50) if is_ascii_safe(s)]
@@ -1347,6 +1757,26 @@ class PasswordRuleMiner:
         combo_rules = self.bfs_generator.generate_append_prepend_combos(common_strings, limit=50)
         self.scored_rules.extend(combo_rules)
         log.info(f"Generated {len(combo_rules):,} BFS combination rules")
+        
+        # Generate advanced swap rules
+        swap_rules = generate_advanced_swap_rules([0, 1, 2, 3, 4])
+        for swap_rule in swap_rules:
+            self.scored_rules.append((350_000, swap_rule))
+        log.info(f"Generated {len(swap_rules):,} advanced swap rules")
+        
+        # Generate numeric sequence rules
+        numeric_rules = generate_numeric_sequence_rules()
+        for num_rule in numeric_rules:
+            self.scored_rules.append((320_000, num_rule))
+        log.info(f"Generated {len(numeric_rules):,} numeric sequence rules")
+        
+        # Generate combined prepend/append rules
+        prefixes = [p for p, _ in self.prefix.most_common(30) if is_ascii_safe(p)]
+        suffixes = [s for s, _ in self.suffix.most_common(30) if is_ascii_safe(s)]
+        combined_rules = generate_combined_prepend_append_rules(prefixes, suffixes)
+        for comb_rule in combined_rules:
+            self.scored_rules.append((310_000, comb_rule))
+        log.info(f"Generated {len(combined_rules):,} combined prepend/append rules")
     
     def generate_trie_based_bases(self):
         """Generate enhanced base wordlist using trie analysis"""
@@ -1468,12 +1898,34 @@ Top suffixes: {', '.join(k for k, _ in self.suffix.most_common(15))}
         self.generate_bfs_complex_rules()
         self.generate_trie_based_bases()
         
-        # NEW: Comprehensive password analysis
+        # NEW: Custom wordlist rules
+        if self.custom_words:
+            self.generate_custom_wordlist_rules()
+        
+        # NEW: Comprehensive password analysis with Levenshtein scoring
         self.analyze_password_transformations()
+        
+        # NEW: Spell-checked suggestions (if available)
+        if self.spell_checker and len(self.passwords) > 0:
+            log.info("Generating spell-checked password suggestions...")
+            base_words = [w for w, _ in Counter([re.sub(r'[^a-zA-Z]', '', p.lower()) 
+                                                   for p in self.passwords]).most_common(200)]
+            suggestions = self.generate_spell_checked_suggestions(base_words, limit=200)
+            if suggestions:
+                spell_file = self.out / "00_spell_checked_bases.txt"
+                spell_file.write_text("\n".join(suggestions) + "\n", encoding="utf-8")
+                log.info(f" → 00_spell_checked_bases.txt ({len(suggestions):,} suggestions)")
         
         # Write outputs
         self.write_rules()
         self.generate_masks_and_years()
+        
+        # NEW: Write rule effectiveness statistics
+        if self.rule_tracker.rule_stats:
+            stats_report = self.rule_tracker.get_statistics_report()
+            stats_file = self.out / "rule_effectiveness_stats.txt"
+            stats_file.write_text(stats_report + "\n", encoding="utf-8")
+            log.info(f" → rule_effectiveness_stats.txt (statistical analysis)")
         
         log.info("Phase 3/3: All artifacts generated successfully!")
         log.info(f"\nALL DONE! → {self.out.resolve()}")
@@ -1492,7 +1944,7 @@ def find_files(paths: List[str]) -> List[Path]:
     return sorted([f for f in out if f.is_file() and f.stat().st_size > 0])
 
 def main():
-    parser = argparse.ArgumentParser(description="PasswordRuleMiner — Artifact Generator")
+    parser = argparse.ArgumentParser(description="PasswordRuleMiner — Artifact Generator with Advanced Features")
     parser.add_argument("-p", "--pot", nargs="+", required=True, help="Potfile(s) or directory of potfiles")
     parser.add_argument("-hf", "--hashfile", nargs="*", help="Hashfile(s) or directory of hash files")
     parser.add_argument("-o", "--output", type=Path, default=Path("listminer"), help="Output directory")
@@ -1500,6 +1952,10 @@ def main():
     parser.add_argument("--clear-cache", action="store_true", help="Clear cache and exit")
     parser.add_argument("--max-workers", type=int, default=None, 
                         help=f"Maximum number of parallel workers (default: {MAX_WORKERS})")
+    parser.add_argument("-w", "--wordlist", nargs="*", type=Path, 
+                        help="Custom wordlist file(s) for enhanced base generation")
+    parser.add_argument("-v", "--verbose", action="store_true", 
+                        help="Enable verbose/debug mode with detailed logging")
     args = parser.parse_args()
     
     # Handle cache clearing
@@ -1523,7 +1979,22 @@ def main():
     max_workers = args.max_workers if args.max_workers else MAX_WORKERS
     log.info(f"Parallel processing enabled with {max_workers} workers")
     
-    miner = PasswordRuleMiner(args.output, use_cache=use_cache, max_workers=max_workers)
+    # Process custom wordlists if provided
+    custom_wordlists = []
+    if args.wordlist:
+        for wl_path in args.wordlist:
+            if wl_path.exists() and wl_path.is_file():
+                custom_wordlists.append(wl_path)
+            else:
+                log.warning(f"Wordlist not found: {wl_path}")
+    
+    miner = PasswordRuleMiner(
+        args.output, 
+        use_cache=use_cache, 
+        max_workers=max_workers,
+        verbose=args.verbose,
+        custom_wordlists=custom_wordlists
+    )
     miner.mine_potfiles(pot_files)
     if hash_files:
         miner.mine_hashfiles(hash_files)
