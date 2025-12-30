@@ -1385,6 +1385,45 @@ class PasswordRuleMiner:
         out_file.write_text("\n".join(usernames) + "\n", encoding="utf-8")
         log.info(f" → {out_file.name} ({len(usernames):,} unique usernames)")
     
+    def write_unified_wordlist(self):
+        """
+        Create a unified wordlist combining all base wordlists and usernames.
+        Reads from: 00_real_bases.txt, 00_analyzed_bases.txt, 00_trie_bases.txt, usernames.txt
+        Outputs: 00_unified_wordlist.txt (deduplicated and sorted)
+        """
+        log.info("Generating unified wordlist from all base sources...")
+        
+        unified_words = set()
+        
+        # List of source files to combine
+        source_files = [
+            self.out / "00_real_bases.txt",
+            self.out / "00_analyzed_bases.txt",
+            self.out / "00_trie_bases.txt",
+            self.out / "usernames.txt"
+        ]
+        
+        # Read each source file and add to unified set
+        for source_file in source_files:
+            if source_file.exists():
+                try:
+                    with source_file.open('r', encoding='utf-8') as f:
+                        for line in f:
+                            word = line.strip()
+                            if word:  # Only add non-empty words
+                                unified_words.add(word)
+                    log.info(f"  → Loaded {source_file.name}")
+                except Exception as e:
+                    log.warning(f"  → Could not read {source_file.name}: {e}")
+            else:
+                log.warning(f"  → Skipping {source_file.name} (not found)")
+        
+        # Sort and write unified wordlist
+        out_file = self.out / "00_unified_wordlist.txt"
+        sorted_words = sorted(unified_words)
+        out_file.write_text("\n".join(sorted_words) + "\n", encoding="utf-8")
+        log.info(f" → 00_unified_wordlist.txt ({len(sorted_words):,} unique words)")
+    
     def write_rules(self):
         log.info("Writing rule files...")
         self.scored_rules.sort(key=lambda x: x[0], reverse=True)
@@ -1474,6 +1513,9 @@ Top suffixes: {', '.join(k for k, _ in self.suffix.most_common(15))}
         # Write outputs
         self.write_rules()
         self.generate_masks_and_years()
+        
+        # Generate unified wordlist after all bases are created
+        self.write_unified_wordlist()
         
         log.info("Phase 3/3: All artifacts generated successfully!")
         log.info(f"\nALL DONE! → {self.out.resolve()}")
