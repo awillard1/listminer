@@ -234,12 +234,13 @@ class BFSRuleGenerator:
     Combines multiple operations in sequence for comprehensive coverage.
     """
     
-    # Basic Hashcat operations
+    # Basic Hashcat operations (including Hashcat 7+ features)
     OPERATIONS = [
         ('l', 'lowercase'),
         ('u', 'uppercase'),
         ('c', 'capitalize'),
         ('C', 'invert capitalize'),
+        ('E', 'title case'),  # Hashcat 7+
         ('t', 'toggle case'),
         ('r', 'reverse'),
         ('d', 'duplicate'),
@@ -838,6 +839,7 @@ class PasswordRuleMiner:
         """
         Comprehensive password analysis to identify base words and rules.
         Uses multiple strategies to find the best base word candidates.
+        Optimized for speed with early termination and efficient algorithms.
         """
         log.info("Performing comprehensive password transformation analysis...")
         
@@ -848,30 +850,41 @@ class PasswordRuleMiner:
         analyzed_count = 0
         skipped_count = 0
         
+        # Process all passwords (no limits)
         for pwd in progress(self.passwords, desc="Analyzing passwords", leave=False):
-            # Skip very short passwords
+            # Skip very short passwords (quick check)
             if len(pwd) < 4:
                 skipped_count += 1
                 continue
             
-            # Get all possible base candidates
+            # Get all possible base candidates (optimized extraction)
             candidates = self._extract_base_candidates(pwd)
             
             if not candidates:
                 skipped_count += 1
                 continue
             
-            # Try each candidate and pick the best one (first valid rule found)
+            # Try each candidate and pick the best one (early termination on first good match)
             best_base = None
             best_rules = None
             best_score = 0
             
-            for base_candidate, start, end in candidates[:5]:  # Try top 5 candidates
+            # Only try top 3 candidates for speed (most relevant ones)
+            for base_candidate, start, end in candidates[:3]:
                 rules = self._infer_comprehensive_rules(base_candidate, pwd, start, end)
                 
                 if rules:
                     # Score based on base length and rule simplicity
                     score = len(base_candidate) * 100 - rules.count(' ') * 2
+                    
+                    if score > best_score:
+                        best_base = base_candidate
+                        best_rules = rules
+                        best_score = score
+                        
+                        # Early termination: if we find a good match (long base, simple rules), stop
+                        if len(base_candidate) >= 6 and rules.count(' ') <= 10:
+                            break
                     
                     if score > best_score:
                         best_base = base_candidate
