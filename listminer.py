@@ -23,11 +23,36 @@ import re
 import signal
 import sys
 from collections import Counter, defaultdict, deque
-from concurrent.futures import ThreadPoolExecutor, as_completed, ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from threading import Lock
 from typing import List, Iterable, Dict, Set, Tuple, Optional
+
+# =============================================
+# SCORING CONSTANTS
+# =============================================
+# Rule scoring constants for prioritization
+SCORE_USER_CONTEXT_HIGH = 10_000_000
+SCORE_USER_CONTEXT_MEDIUM = 9_900_000
+SCORE_USER_CONTEXT_LOW = 9_800_000
+SCORE_BFS_BASE = 500_000
+SCORE_ROTATION_SWAP_HIGH = 400_000
+SCORE_ROTATION_SWAP_MEDIUM = 380_000
+SCORE_ROTATION_SWAP_LOW = 350_000
+SCORE_ADVANCED_SWAP = 390_000
+SCORE_SWAP_CASE = 370_000
+SCORE_NUMERIC = 320_000
+SCORE_COMBINED_RULES = 310_000
+SCORE_PREPEND_APPEND = 300_000
+SCORE_SURROUND = 250_000
+SCORE_CUSTOM_WORDLIST = 200_000
+
+# Levenshtein distance smoothing factor
+LEVENSHTEIN_SMOOTHING = 1.0
+
+# Maximum transformation history per rule to prevent memory issues
+MAX_TRANSFORMATION_HISTORY = 10
 
 # =============================================
 # PROGRESS BAR
@@ -155,10 +180,12 @@ class RuleEffectivenessTracker:
         self.rule_stats[rule]['levenshtein_sum'] += lev_dist
         
         # Limit transformation history to prevent memory issues
-        if len(self.rule_stats[rule]['transformations']) < 10:
+        if len(self.rule_stats[rule]['transformations']) < MAX_TRANSFORMATION_HISTORY:
             self.rule_stats[rule]['transformations'].append((base, password))
         
-        self.transformation_history.append((base, password, rule, lev_dist))
+        # Limit overall transformation history size to prevent unbounded growth
+        if len(self.transformation_history) < 10000:  # Max 10k transformations stored
+            self.transformation_history.append((base, password, rule, lev_dist))
     
     def get_rule_effectiveness(self, rule: str) -> float:
         """Calculate effectiveness score for a rule"""
@@ -170,7 +197,7 @@ class RuleEffectivenessTracker:
         avg_levenshtein = stats['levenshtein_sum'] / stats['count']
         
         # Effective rules have high scores and low transformation effort
-        effectiveness = avg_score / (1 + avg_levenshtein)
+        effectiveness = avg_score / (LEVENSHTEIN_SMOOTHING + avg_levenshtein)
         return effectiveness
     
     def prune_ineffective_rules(self, rules: List[Tuple[int, str]], min_effectiveness: float = 100.0) -> List[Tuple[int, str]]:
@@ -383,11 +410,14 @@ def hashcat_purge_character(char: str) -> str:
         return None
     return f"@{char}"
 
-def generate_advanced_swap_rules(common_positions: List[int] = [0, 1, 2, -1, -2]) -> List[str]:
+def generate_advanced_swap_rules(common_positions: Optional[List[int]] = None) -> List[str]:
     """
     Generate advanced multi-character swap rules.
     Swaps characters at common positions to create password variants.
     """
+    if common_positions is None:
+        common_positions = [0, 1, 2, -1, -2]
+    
     rules = []
     for i, pos1 in enumerate(common_positions):
         for pos2 in common_positions[i+1:]:
@@ -572,7 +602,7 @@ class BFSRuleGenerator:
             
             if depth > 0:
                 # Score based on complexity and depth
-                score = 500_000 // (depth + 1)
+                score = SCORE_BFS_BASE // (depth + 1)
                 scored_rules.append((score, current_rule.strip()))
             
             if depth >= self.max_depth:
@@ -597,26 +627,26 @@ class BFSRuleGenerator:
         # Rotation combinations
         rotation_ops = ['{', '}', '{{', '}}']  # Single and double rotations
         for rot in rotation_ops:
-            scored_rules.append((400_000, rot))
+            scored_rules.append((SCORE_ROTATION_SWAP_HIGH, rot))
             
             # Rotation with case changes
             for case_op in ['l', 'c', 'u']:
-                scored_rules.append((380_000, f"{rot} {case_op}"))
-                scored_rules.append((375_000, f"{case_op} {rot}"))
+                scored_rules.append((SCORE_ROTATION_SWAP_MEDIUM, f"{rot} {case_op}"))
+                scored_rules.append((SCORE_ROTATION_SWAP_MEDIUM - 5000, f"{case_op} {rot}"))
         
         # Swap combinations
         swap_rules = generate_advanced_swap_rules([0, 1, 2, 3])
         for swap in swap_rules:
-            scored_rules.append((390_000, swap))
+            scored_rules.append((SCORE_ADVANCED_SWAP, swap))
             
             # Swap with case changes
-            scored_rules.append((370_000, f"{swap} l"))
-            scored_rules.append((365_000, f"{swap} c"))
+            scored_rules.append((SCORE_SWAP_CASE, f"{swap} l"))
+            scored_rules.append((SCORE_SWAP_CASE - 5000, f"{swap} c"))
         
         # Combined rotations and swaps
         for rot in ['{', '}']:
             for swap in swap_rules[:3]:  # Limit combinations
-                scored_rules.append((350_000, f"{rot} {swap}"))
+                scored_rules.append((SCORE_ROTATION_SWAP_LOW, f"{rot} {swap}"))
         
         return scored_rules
     
@@ -634,21 +664,21 @@ class BFSRuleGenerator:
             prep = hashcat_prepend(s)
             if not prep:
                 continue
-            scored_rules.append((300_000, prep))
+            scored_rules.append((SCORE_PREPEND_APPEND, prep))
             
             # Append only
             app = hashcat_append(s)
             if not app:
                 continue
-            scored_rules.append((300_000, app))
+            scored_rules.append((SCORE_PREPEND_APPEND, app))
             
             # Prepend + append same
-            scored_rules.append((250_000, f"{prep} {app}"))
+            scored_rules.append((SCORE_SURROUND, f"{prep} {app}"))
             
             # With case operations
-            scored_rules.append((280_000, f"l {app}"))
-            scored_rules.append((275_000, f"c {app}"))
-            scored_rules.append((270_000, f"l {prep}"))
+            scored_rules.append((SCORE_PREPEND_APPEND - 20000, f"l {app}"))
+            scored_rules.append((SCORE_PREPEND_APPEND - 25000, f"c {app}"))
+            scored_rules.append((SCORE_PREPEND_APPEND - 30000, f"l {prep}"))
             scored_rules.append((265_000, f"c {prep}"))
         
         return scored_rules
@@ -935,9 +965,9 @@ class PasswordRuleMiner:
                 app = hashcat_append(word)
                 
                 if prep:
-                    self.scored_rules.append((200_000, prep))
+                    self.scored_rules.append((SCORE_CUSTOM_WORDLIST, prep))
                 if app:
-                    self.scored_rules.append((200_000, app))
+                    self.scored_rules.append((SCORE_CUSTOM_WORDLIST, app))
         
         log.info(f"Generated rules from {min(500, len(self.custom_words))} custom words")
     
@@ -1124,13 +1154,13 @@ class PasswordRuleMiner:
                 app_cap = hashcat_append(cap)
                 
                 if prep_low:
-                    self.scored_rules.append((10_000_000, prep_low))
+                    self.scored_rules.append((SCORE_USER_CONTEXT_HIGH, prep_low))
                 if prep_cap:
-                    self.scored_rules.append((9_900_000, prep_cap))
+                    self.scored_rules.append((SCORE_USER_CONTEXT_MEDIUM, prep_cap))
                 if app_low:
-                    self.scored_rules.append((9_900_000, app_low))
+                    self.scored_rules.append((SCORE_USER_CONTEXT_MEDIUM, app_low))
                 if app_cap:
-                    self.scored_rules.append((9_800_000, app_cap))
+                    self.scored_rules.append((SCORE_USER_CONTEXT_LOW, app_cap))
 
                 context_count += 1
 
@@ -1761,13 +1791,13 @@ class PasswordRuleMiner:
         # Generate advanced swap rules
         swap_rules = generate_advanced_swap_rules([0, 1, 2, 3, 4])
         for swap_rule in swap_rules:
-            self.scored_rules.append((350_000, swap_rule))
+            self.scored_rules.append((SCORE_ROTATION_SWAP_LOW, swap_rule))
         log.info(f"Generated {len(swap_rules):,} advanced swap rules")
         
         # Generate numeric sequence rules
         numeric_rules = generate_numeric_sequence_rules()
         for num_rule in numeric_rules:
-            self.scored_rules.append((320_000, num_rule))
+            self.scored_rules.append((SCORE_NUMERIC, num_rule))
         log.info(f"Generated {len(numeric_rules):,} numeric sequence rules")
         
         # Generate combined prepend/append rules
@@ -1775,7 +1805,7 @@ class PasswordRuleMiner:
         suffixes = [s for s, _ in self.suffix.most_common(30) if is_ascii_safe(s)]
         combined_rules = generate_combined_prepend_append_rules(prefixes, suffixes)
         for comb_rule in combined_rules:
-            self.scored_rules.append((310_000, comb_rule))
+            self.scored_rules.append((SCORE_COMBINED_RULES, comb_rule))
         log.info(f"Generated {len(combined_rules):,} combined prepend/append rules")
     
     def generate_trie_based_bases(self):
