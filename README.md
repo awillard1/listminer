@@ -139,6 +139,8 @@ All artifacts are written to the specified output directory.
 | --------------------------- | -------------------------------------------------------------------- |
 | `00_real_bases.txt`         | Top base words extracted from potfiles (filtered 4+ character words) |
 | `00_trie_bases.txt`         | **NEW:** Enhanced base words using trie-based pattern analysis       |
+| `00_analyzed_bases.txt`     | Base words from comprehensive password transformation analysis       |
+| `00_unified_passwords.txt`  | **Unified file:** All bases + usernames combined, sorted, and unique |
 | `usernames.txt`             | Unique usernames parsed from hashfiles                               |
 | `01_elite.rule`             | Top 15,000 pre-scored Hashcat rules (includes advanced features)     |
 | `02_extended_50k.rule`      | Top 50,000 pre-scored Hashcat rules (includes advanced features)     |

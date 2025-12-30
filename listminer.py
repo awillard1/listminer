@@ -1385,6 +1385,66 @@ class PasswordRuleMiner:
         out_file.write_text("\n".join(usernames) + "\n", encoding="utf-8")
         log.info(f" → {out_file.name} ({len(usernames):,} unique usernames)")
     
+    def generate_unified_password_file(self):
+        """
+        Combine base words (real_bases, trie_bases, analyzed_bases) and usernames
+        into a single unified, sorted, and deduplicated password file.
+        """
+        log.info("Generating unified password file (combining all bases and usernames)...")
+        
+        unified_words = set()
+        
+        # Collect words from 00_real_bases.txt
+        real_bases_file = self.out / "00_real_bases.txt"
+        if real_bases_file.exists():
+            with real_bases_file.open("r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    word = line.strip()
+                    if word:
+                        unified_words.add(word)
+            log.info(f"  → Added {len(unified_words):,} words from 00_real_bases.txt")
+        
+        # Collect words from 00_trie_bases.txt
+        trie_bases_file = self.out / "00_trie_bases.txt"
+        if trie_bases_file.exists():
+            before_count = len(unified_words)
+            with trie_bases_file.open("r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    word = line.strip()
+                    if word:
+                        unified_words.add(word)
+            log.info(f"  → Added {len(unified_words) - before_count:,} new words from 00_trie_bases.txt")
+        
+        # Collect words from 00_analyzed_bases.txt
+        analyzed_bases_file = self.out / "00_analyzed_bases.txt"
+        if analyzed_bases_file.exists():
+            before_count = len(unified_words)
+            with analyzed_bases_file.open("r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    word = line.strip()
+                    if word:
+                        unified_words.add(word)
+            log.info(f"  → Added {len(unified_words) - before_count:,} new words from 00_analyzed_bases.txt")
+        
+        # Collect usernames from usernames.txt
+        usernames_file = self.out / "usernames.txt"
+        if usernames_file.exists():
+            before_count = len(unified_words)
+            with usernames_file.open("r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    word = line.strip()
+                    if word:
+                        unified_words.add(word)
+            log.info(f"  → Added {len(unified_words) - before_count:,} new words from usernames.txt")
+        
+        # Sort the unified wordlist
+        sorted_unified = sorted(unified_words)
+        
+        # Write the unified file
+        out_file = self.out / "00_unified_passwords.txt"
+        out_file.write_text("\n".join(sorted_unified) + "\n", encoding="utf-8")
+        log.info(f" → 00_unified_passwords.txt ({len(sorted_unified):,} unique words)")
+    
     def write_rules(self):
         log.info("Writing rule files...")
         self.scored_rules.sort(key=lambda x: x[0], reverse=True)
@@ -1474,6 +1534,9 @@ Top suffixes: {', '.join(k for k, _ in self.suffix.most_common(15))}
         # Write outputs
         self.write_rules()
         self.generate_masks_and_years()
+        
+        # Generate unified password file (combines all bases and usernames)
+        self.generate_unified_password_file()
         
         log.info("Phase 3/3: All artifacts generated successfully!")
         log.info(f"\nALL DONE! → {self.out.resolve()}")
