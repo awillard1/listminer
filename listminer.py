@@ -40,8 +40,11 @@ def progress(it, **kw):
 # =============================================
 # PARALLEL PROCESSING CONFIGURATION
 # =============================================
+# Fallback CPU count when os.cpu_count() returns None (unknown system)
+FALLBACK_CPU_COUNT = 4
+
 # Determine optimal worker count (CPU count or environment variable)
-DEFAULT_WORKERS = min(8, (os.cpu_count() or 4))
+DEFAULT_WORKERS = min(8, (os.cpu_count() or FALLBACK_CPU_COUNT))
 MAX_WORKERS = int(os.environ.get('LISTMINER_MAX_WORKERS', DEFAULT_WORKERS))
 
 # Batch multiplier for load balancing across workers
@@ -464,7 +467,11 @@ class PasswordTrie:
                 try:
                     batch_counter = future.result()
                     word_counter.update(batch_counter)
-                    # Insert into trie (sequential for thread safety)
+                    # Insert into trie sequentially for thread safety
+                    # Note: Trie insertion is done here rather than in parallel workers
+                    # to avoid the complexity and overhead of thread-safe trie operations.
+                    # This sequential insertion is fast enough since it's just updating
+                    # the already-computed word counts.
                     for word, count in batch_counter.items():
                         self.insert(word, count)
                 except Exception as e:
@@ -517,7 +524,8 @@ class PasswordRuleMiner:
         if items_count == 0:
             return 1
         calculated_size = items_count // (max_workers * BATCH_MULTIPLIER)
-        return max(1, min(min_batch_size, calculated_size)) if calculated_size < min_batch_size else calculated_size
+        # Return the maximum of 1 and min_batch_size, but use calculated_size if it's larger
+        return max(1, max(min_batch_size if calculated_size < min_batch_size else calculated_size, 1))
     
     def _calculate_batch_size(self, items_count: int, min_batch_size: int = MIN_PASSWORD_BATCH_SIZE) -> int:
         """Calculate optimal batch size for parallel processing using instance workers"""
@@ -1295,7 +1303,7 @@ class PasswordRuleMiner:
             return batch_rules
         
         # Create batches for parallel processing (smaller batches for word processing)
-        batch_size = self._calculate_batch_size_for_workers(len(top_words), self.max_workers, MIN_WORD_BATCH_SIZE)
+        batch_size = self._calculate_batch_size(len(top_words), MIN_WORD_BATCH_SIZE)
         word_batches = [
             top_words[i:i + batch_size]
             for i in range(0, len(top_words), batch_size)
