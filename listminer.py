@@ -1398,7 +1398,7 @@ class PasswordRuleMiner:
         # List of source files to combine
         source_files = [
             self.out / "00_real_bases.txt",
-            self.out / "00_analyzed_bases.txt", 
+            self.out / "00_analyzed_bases.txt",
             self.out / "00_trie_bases.txt",
             self.out / "usernames.txt"
         ]
