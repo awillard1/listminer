@@ -161,26 +161,25 @@ The tool now features **comprehensive leet-speak (1337) transformation capabilit
 
 #### Expanded Character Mappings
 
-* **Lowercase and Uppercase Support:**
-  * `a/A` → `@`, `4`, `/\`, `Δ`
-  * `e/E` → `3`, `€`, `&`
-  * `i/I` → `1`, `!`, `|`, `¡`
-  * `o/O` → `0`, `()`
+* **Lowercase and Uppercase Support (ASCII-safe only):**
+  * `a/A` → `@`, `4`
+  * `e/E` → `3`, `&`
+  * `i/I` → `1`, `!`, `|`
+  * `o/O` → `0`
   * `s/S` → `$`, `5`, `z`
-  * `t/T` → `7`, `+`, `†`
+  * `t/T` → `7`, `+`
   * `l/L` → `1`, `|`
   * `g/G` → `9`, `6`
   * `b/B` → `8`, `6`
   * `z/Z` → `2`, `5`
-  * `h/H` → `#`, `|-|`
+  * `h/H` → `#`
   * `c/C` → `(`, `<`, `{`
-  * `y/Y` → `¥`, `j`
-  * `n/N` → `|\|`, `И`
-  * `x/X` → `><`, `%`
+  * `y/Y` → `j`
+  * `x/X` → `%`
   * `p/P`, `q/Q` → `9`
-  * `v/V` → `\\/`
-  * `w/W` → `\\/\\/`
-  * `m/M` → `|\\/|`
+  * `d/D` → `6`
+  * `f/F` → `#`
+  * `k/K` → `X`
 
 #### Real-World Pattern Dictionary
 

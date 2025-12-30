@@ -211,8 +211,6 @@ LEET_MAP = {
     'C': ['(', '<', '{'],
     'y': ['j'],
     'Y': ['j'],
-    'n': ['И'],
-    'N': ['И'],
     'x': ['%'],
     'X': ['%'],
     'p': ['9'],
@@ -277,7 +275,11 @@ def generate_leet_rules(word: str, max_substitutions: int = 3) -> List[Tuple[int
         for leet_variant in LEET_PATTERNS[word_lower]:
             # Generate rule to transform word to this variant
             rule_parts = []
-            for i, (orig_char, leet_char) in enumerate(zip(word_lower, leet_variant)):
+            # Ensure both strings have the same length before zipping
+            min_len = min(len(word_lower), len(leet_variant))
+            for i in range(min_len):
+                orig_char = word_lower[i]
+                leet_char = leet_variant[i]
                 if orig_char != leet_char and is_ascii_safe(leet_char):
                     rule_parts.append(f"s{orig_char}{leet_char}")
             
@@ -1424,9 +1426,9 @@ class PasswordRuleMiner:
         base_words = []
         word_counter = Counter()
         for pwd in self.passwords:
-            cleaned = re.sub(r'[^a-zA-Z]', '', pwd.lower())
-            if 4 <= len(cleaned) <= 10:
-                word_counter[cleaned] += 1
+            cleaned_lower = re.sub(r'[^a-zA-Z]', '', pwd.lower())
+            if 4 <= len(cleaned_lower) <= 10:
+                word_counter[cleaned_lower] += 1
         
         top_base_words = [word for word, _ in word_counter.most_common(100)]
         
