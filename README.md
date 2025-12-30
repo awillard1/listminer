@@ -1,15 +1,16 @@
 # ListMiner — PasswordRuleMiner — Password Artifact Generator
 
-**Version:** 2025 (Enhanced Edition with Advanced Rule Generation)
+**Version:** 2025 (Enhanced Edition with Advanced Rule Generation + John the Ripper Support)
 
 ## Overview
 
-`PasswordRuleMiner` (also known as **ListMiner**) is a Python-based tool designed to generate **Hashcat rules, masks, and username-based password artifacts** from existing potfiles and hashfiles. It is built for red teamers, penetration testers, and security researchers who want to generate highly targeted password mutation rules and candidate wordlists.
+`PasswordRuleMiner` (also known as **ListMiner**) is a Python-based tool designed to generate **Hashcat and John the Ripper (JtR) rules, masks, and username-based password artifacts** from existing potfiles and hashfiles. It is built for red teamers, penetration testers, and security researchers who want to generate highly targeted password mutation rules and candidate wordlists.
 
 **Key Features:**
 
 * Process single or multiple potfiles and hash files (directory recursion supported)
-* Generate Hashcat prepend and append rules based on real usernames
+* **NEW: Generate rules for both Hashcat AND John the Ripper** with `--rules` option
+* Generate prepend and append rules based on real usernames
 * Extract robust usernames from various hash formats including DOMAIN\USER, NTLM, SHA, and Kerberos
 * Generate masks and year/season rules for faster cracking
 * Output statistics, base wordlists, and multiple pre-scored rule files
@@ -56,7 +57,7 @@ Save `listminer.py` to your working directory.
 ```text
 usage: listminer.py [-h] -p POT [POT ...] [-hf [HASHFILE ...]] [-o OUTPUT] 
                     [--no-cache] [--clear-cache] [--max-workers MAX_WORKERS]
-                    [-w [WORDLIST ...]] [-v]
+                    [-w [WORDLIST ...]] [-v] [--rules {hashcat,john,both}]
 
 PasswordRuleMiner — Artifact Generator with Advanced Features
 
@@ -74,7 +75,28 @@ options:
   -w WORDLIST, --wordlist WORDLIST
                         Custom wordlist file(s) for enhanced base generation
   -v, --verbose         Enable verbose/debug mode with detailed logging
+  --rules {hashcat,john,both}
+                        Output rule format: 'hashcat' (default), 'john' (John the Ripper), or 'both'
 ```
+
+### Rule Format Selection
+
+**NEW:** ListMiner now supports generating rules for both Hashcat and John the Ripper!
+
+```bash
+# Generate Hashcat rules only (default)
+python3 listminer.py -p potfile.pot -o output
+
+# Generate John the Ripper rules only
+python3 listminer.py -p potfile.pot -o output --rules john
+
+# Generate BOTH Hashcat and John the Ripper rules
+python3 listminer.py -p potfile.pot -o output --rules both
+```
+
+**Output files:**
+- Hashcat rules: `01_elite.rule`, `02_extended_50k.rule`, `03_complete.rule`
+- John the Ripper rules: `01_elite.john`, `02_extended_50k.john`, `03_complete.john`
 
 ### Caching
 
@@ -146,19 +168,31 @@ python3 listminer.py -p potfile.pot -o output --max-workers 1
 
 ### Examples
 
-#### Generate rules from a potfile directory:
+#### Generate Hashcat rules from a potfile directory (default):
 
 ```bash
 python listminer.py -p ~/hashes/potfiles/ -o output_rules
 ```
 
+#### Generate John the Ripper rules only:
+
+```bash
+python listminer.py -p ~/hashes/potfile.txt -o output_rules --rules john
+```
+
+#### Generate both Hashcat AND John the Ripper rules:
+
+```bash
+python listminer.py -p ~/hashes/potfile.txt -o output_rules --rules both
+```
+
 #### Generate rules from a single potfile and multiple hash files:
 
 ```bash
-python listminer.py -p ~/hashes/potfile.txt -hf ~/hashes/hashes1.txt ~/hashes/hashes2.txt -o output_rules
+python listminer.py -p ~/hashes/potfile.txt -hf ~/hashes/hashes1.txt ~/hashes/hashes2.txt -o output_rules --rules both
 ```
 
-#### Minimal output directory (default `rules`):
+#### Minimal output directory (default `listminer`):
 
 ```bash
 python listminer.py -p ~/hashes/potfile.txt
@@ -176,10 +210,15 @@ All artifacts are written to the specified output directory.
 | `00_analyzed_bases.txt`            | **NEW:** Base words identified through transformation analysis             |
 | `00_trie_bases.txt`                | **NEW:** Enhanced base words using trie-based pattern analysis             |
 | `00_spell_checked_bases.txt`       | **NEW:** Spell-checked suggestions (if pyenchant available)                |
+| `00_combined_bases.txt`            | Unified list combining all base word sources                               |
 | `usernames.txt`                    | Unique usernames parsed from hashfiles                                     |
 | `01_elite.rule`                    | Top 15,000 pre-scored Hashcat rules (includes advanced features)           |
 | `02_extended_50k.rule`             | Top 50,000 pre-scored Hashcat rules (includes advanced features)           |
-| `03_complete.rule`                 | Complete set of scored rules (includes all features)                       |
+| `03_complete.rule`                 | Complete set of scored Hashcat rules (includes all features)               |
+| `01_elite.john`                    | **NEW:** Top 15,000 John the Ripper rules                                  |
+| `02_extended_50k.john`             | **NEW:** Top 50,000 John the Ripper rules                                  |
+| `03_complete.john`                 | **NEW:** Complete set of John the Ripper rules                             |
+| `jtr_limitations.txt`              | **NEW:** Documentation of JtR conversion limitations (when using --rules john) |
 | `04_mask_candidates.hcmask`        | Top 100 mask candidates generated from passwords                           |
 | `05_years_seasons.rule`            | Year and season mutation rules                                             |
 | `stats.txt`                        | Summary of total passwords, prefixes, and suffixes                         |
@@ -360,6 +399,80 @@ Leverages Python's `concurrent.futures` module for high-performance parallel exe
 - Overall tool execution: 2-5x faster depending on dataset size and CPU cores
 
 ---
+
+---
+
+## John the Ripper (JtR) Rule Generation
+
+**NEW:** ListMiner now supports generating rules for John the Ripper in addition to Hashcat!
+
+### Overview
+
+John the Ripper uses a similar rule syntax to Hashcat, with some key differences:
+
+* **Rule concatenation**: JtR concatenates rule operations without spaces (e.g., `lc$2$0$2$4` instead of `l c $2 $0 $2 $4`)
+* **Compatible operations**: Most basic operations are identical between Hashcat and JtR
+* **Incompatible operations**: Some advanced Hashcat operations don't have JtR equivalents
+
+### Compatible Operations
+
+The following operations work in both Hashcat and JtR:
+
+* **Case transformations**: `l` (lowercase), `u` (uppercase), `c` (capitalize), `C` (invert capitalize), `t` (toggle), `E` (title case)
+* **Character operations**: `^X` (prepend), `$X` (append), `sXY` (substitute X with Y), `@X` (purge X)
+* **Positional operations**: `iNX` (insert X at position N), `oNX` (overwrite at N), `DN` (delete at N), `TN` (toggle case at N)
+* **Duplication/Rotation**: `d` (duplicate), `r` (reverse), `{` (rotate left), `}` (rotate right)
+* **Trimming**: `[` (remove first), `]` (remove last)
+
+### Incompatible Operations (Hashcat-only)
+
+The following Hashcat operations **do not** have JtR equivalents and are skipped during conversion:
+
+* **Bitwise operations**: `L` (bitwise shift left), `R` (bitwise shift right)
+
+When using `--rules john`, these operations are automatically filtered out and documented in `jtr_limitations.txt`.
+
+### Usage Examples
+
+```bash
+# Generate JtR rules only
+python3 listminer.py -p potfile.pot --rules john -o jtr_output
+
+# Generate both Hashcat and JtR rules (recommended)
+python3 listminer.py -p potfile.pot --rules both -o output
+
+# Use with hashfiles for username-based rules
+python3 listminer.py -p potfile.pot -hf hashes.txt --rules both -o output
+```
+
+### Rule Format Comparison
+
+**Hashcat format** (space-separated):
+```
+l c $2 $0 $2 $4
+^p ^a ^s $!
+sa@ se3 so0
+```
+
+**John the Ripper format** (concatenated):
+```
+lc$2$0$2$4
+^s^a^p$!
+sa@se3so0
+```
+
+### Leet-Speak Rules
+
+Both Hashcat and JtR support single-character leet substitutions:
+
+* `a` → `@`, `4`
+* `e` → `3`
+* `i` → `1`, `!`
+* `o` → `0`
+* `s` → `$`, `5`
+* `t` → `7`, `+`
+
+**Note**: Multi-character leet substitutions (e.g., `ph` for `f`, `|-|` for `h`) are automatically filtered out as they're not supported by either tool.
 
 ---
 
