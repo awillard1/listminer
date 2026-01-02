@@ -28,6 +28,7 @@ from datetime import datetime
 from pathlib import Path
 from threading import Lock
 from typing import List, Iterable, Dict, Set, Tuple, Optional
+from typing import Any
 
 # =============================================
 # SCORING CONSTANTS
@@ -261,7 +262,7 @@ class FileCache:
         key = self._get_file_key(filepath)
         return self.cache_dir / f"{cache_type}_{key}.pkl"
     
-    def get(self, filepath: Path, cache_type: str) -> Optional[any]:
+    def get(self, filepath: Path, cache_type: str) -> Optional[Any]:
         """Retrieve cached data for a file if valid"""
         if not self.enabled:
             return None
@@ -280,7 +281,7 @@ class FileCache:
             cache_path.unlink(missing_ok=True)
             return None
     
-    def set(self, filepath: Path, cache_type: str, data: any):
+    def set(self, filepath: Path, cache_type: str, data: Any) -> None:
         """Store data in cache for a file"""
         if not self.enabled:
             return
@@ -552,24 +553,24 @@ class JohnTheRipperRuleGenerator:
     
     def generate_leet_rules(self, word: str, max_substitutions: int = 2) -> List[Tuple[int, str]]:
         """
-        Generate leet-speak JtR substitution rules for a word.
-        Uses 's' command for character substitution (same as Hashcat).
+        Generate simple leet-speak substitution rules for John the Ripper.
+        Uses only single-character 'sXY' commands (JtR limitation).
         """
         rules = []
         word_lower = word.lower()
         positions = [(i, c) for i, c in enumerate(word_lower) if c in LEET_MAP]
-        
+
         if not positions:
             return rules
-        
+
         # Single substitutions
         for _, char in positions:
-            for leet_char in LEET_MAP[char][:3]:  # Limit to top 3 leet variations
-                if len(leet_char) == 1:  # JtR only supports single char substitutions
+            for leet_char in LEET_MAP[char][:3]:  # Top 3 variants
+                if len(leet_char) == 1:  # JtR only supports single-char replacement
                     rule = f"s{char}{leet_char}"
                     rules.append((SCORE_NUMERIC, rule))
-        
-        # Double substitutions (if enough positions)
+
+        # Double substitutions (optional, limited)
         if len(positions) >= 2 and max_substitutions >= 2:
             for i in range(len(positions)):
                 for j in range(i + 1, min(i + 3, len(positions))):
@@ -583,7 +584,7 @@ class JohnTheRipperRuleGenerator:
                                 continue
                             rule = f"s{char1}{leet1}s{char2}{leet2}"
                             rules.append((SCORE_NUMERIC - 10000, rule))
-        
+
         return rules
     
     def convert_from_hashcat_rules(self, hashcat_rules: List[Tuple[int, str]]) -> List[Tuple[int, str]]:
@@ -794,6 +795,44 @@ LEET_MAP = {
     'Z': ['2', '5'],
 }
 
+# =============================================
+# Multi-Character Leet Expansion Functionality
+# =============================================
+
+def preprocess_leet_expansions(passwords: List[str], leet_map: Dict[str, List[str]], max_expansions: int = 5000) -> Set[str]:
+    """
+    Preprocesses a list of passwords to handle multi-character leet substitutions.
+    Converts passwords based on leet_map and returns expanded passwords.
+    """
+    def expand_word(word: str, leet_map: Dict[str, List[str]]) -> Set[str]:
+        """Expand a word with multi-character leet substitutions."""
+        expanded = set()
+        queue = [(word, 0)]  # Track current word and index to expand
+
+        while queue:
+            current_word, idx = queue.pop(0)
+            if idx >= len(current_word):
+                expanded.add(current_word)
+                continue
+            
+            char = current_word[idx]
+            
+            # Apply all leet transformations
+            if char in leet_map:
+                for variant in leet_map[char]:
+                    new_word = current_word[:idx] + variant + current_word[idx + 1:]
+                    queue.append((new_word, idx + len(variant)))
+
+            # Proceed without modification
+            queue.append((current_word, idx + 1))
+
+        return expanded
+
+    expanded_set = set()
+    for password in passwords[:max_expansions]:  # Limit to avoid performance issues
+        expanded_set.update(expand_word(password, leet_map))
+
+    return expanded_set
 
 def generate_leet_rules(word: str, max_substitutions: int = 2) -> List[str]:
     """
@@ -2263,13 +2302,16 @@ class PasswordRuleMiner:
     
     def write_rules(self):
         log.info("Writing rule files...")
-        
         # Write Hashcat rules if requested
         if self.rule_format in ["hashcat", "both"]:
             log.info("Generating Hashcat rule files...")
             self.scored_rules.sort(key=lambda x: x[0], reverse=True)
             seen = set()
-            unique_rules = [r for _, r in self.scored_rules if r not in seen and not seen.add(r)]
+            unique_rules = []
+            for _, rule in self.scored_rules:  # Note: ignore score here, already sorted
+                if all(ord(c) < 128 for c in rule) and rule not in seen:
+                    unique_rules.append(rule)
+                    seen.add(rule)
 
             def write_file(path, data):
                 path.write_text("\n".join(data) + "\n", encoding="utf-8")
@@ -2278,7 +2320,6 @@ class PasswordRuleMiner:
             write_file(self.out / "01_elite.rule", unique_rules[:15_000])
             write_file(self.out / "02_extended_50k.rule", unique_rules[:50_000])
             write_file(self.out / "03_complete.rule", unique_rules)
-        
         # Write John the Ripper rules if requested
         if self.rule_format in ["john", "both"]:
             log.info("Generating John the Ripper rule files...")
@@ -2350,11 +2391,14 @@ For maximum compatibility, use --rules both to generate rules for both Hashcat a
             short = f"{y:02d}"
             digits = hashcat_append(short)
             year_rules.extend([f"l{digits}", f"l c{digits}", f"l{digits} $!", f"l c{digits} $!"])
-        seasons = ["spring","summer","fall","winter","jan","feb","mar","apr","may","jun",
+        
+        current_year = datetime.now().year
+        seasons = ["spring","summer","fall","winter","jan","feb","mar","apr","may","jun", "july"
                    "jul","aug","sep","oct","nov","dec"]
         for word in seasons:
             cap = word.capitalize()
-            for yr in ["2024","2025","2026"]:
+            for offset in range(0, 5):  # Current year + 4 future years
+                yr = str(current_year + offset)
                 ydigits = hashcat_append(yr)
                 base_low = hashcat_append(word)
                 base_cap = hashcat_append(cap)
