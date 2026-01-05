@@ -98,15 +98,33 @@ log = logging.getLogger(__name__)
 # Thread-safe logging lock for parallel operations
 _log_lock = Lock()
 
+# Global interrupt flag for graceful shutdown
+_interrupt_requested = False
+_interrupt_lock = Lock()
+
 def parallel_log(message: str):
     """Thread-safe logging for parallel operations"""
     with _log_lock:
         log.info(message)
 
 def sigint_handler(signum, frame):
-    log.warning("\nInterrupted by user — exiting cleanly")
-    sys.exit(0)
+    """Handle Ctrl-C gracefully by setting interrupt flag"""
+    global _interrupt_requested
+    with _interrupt_lock:
+        if _interrupt_requested:
+            # Second Ctrl-C: force exit
+            log.warning("\nForced exit by user")
+            sys.exit(1)
+        _interrupt_requested = True
+    log.warning("\nInterrupt requested — finishing current file and generating artifacts with data collected so far...")
+    log.warning("Press Ctrl-C again to force immediate exit")
+
 signal.signal(signal.SIGINT, sigint_handler)
+
+def is_interrupt_requested() -> bool:
+    """Check if interrupt has been requested"""
+    with _interrupt_lock:
+        return _interrupt_requested
 
 # =============================================
 # SPELL-CHECKING LIBRARY (OPTIONAL)
@@ -1327,15 +1345,26 @@ class PasswordRuleMiner:
         total = 0
         log.info("Phase 1/3: Mining potfiles...")
         for f in files:
+            # Check if interrupt was requested before processing next file
+            if is_interrupt_requested():
+                log.info("Interrupt requested — skipping remaining potfiles")
+                break
+                
             fpath = f.expanduser().resolve()
             if fpath.is_dir():
                 for subfile in progress(list(fpath.rglob("*")), desc=f"{fpath.name} (dir)", leave=False):
+                    # Check for interrupt before each subfile
+                    if is_interrupt_requested():
+                        log.info("Interrupt requested — skipping remaining files in directory")
+                        break
+                    
                     if subfile.is_file() and subfile.stat().st_size > 0:
                         log.info(f"Reading potfile: {subfile}")
                         total += self._parse_potfile(subfile)
             elif fpath.is_file():
                 log.info(f"Reading potfile: {fpath}")
                 total += self._parse_potfile(fpath)
+        
         log.info(f"Collected {total:,} plaintext passwords from potfiles.")
 
         # Build prefix/suffix counters (max 6 chars, never full password)
@@ -1359,15 +1388,28 @@ class PasswordRuleMiner:
         # Parse file
         count = 0
         passwords = []
-        with path.open("r", encoding="utf-8", errors="ignore") as f:
-            for line in progress(f, desc=path.stem[:30], leave=False):
-                pwd = extract_password_from_pot(line)
-                if pwd and len(pwd) >= 1:
-                    passwords.append(pwd)
-                    count += 1
+        interrupted = False
+        try:
+            with path.open("r", encoding="utf-8", errors="ignore") as f:
+                for line in progress(f, desc=path.stem[:30], leave=False):
+                    # Check for interrupt request
+                    if is_interrupt_requested():
+                        interrupted = True
+                        log.info(f"  → Interrupt detected while reading {path.name}, saving partial data ({count} passwords so far)")
+                        break
+                    
+                    pwd = extract_password_from_pot(line)
+                    if pwd and len(pwd) >= 1:
+                        passwords.append(pwd)
+                        count += 1
+        except KeyboardInterrupt:
+            interrupted = True
+            log.info(f"  → Interrupt detected while reading {path.name}, saving partial data ({count} passwords so far)")
         
-        # Store in cache
-        self.cache.set(path, "potfile", (passwords, count))
+        # Store in cache only if file was fully processed
+        if not interrupted and count > 0:
+            self.cache.set(path, "potfile", (passwords, count))
+        
         self.passwords.extend(passwords)
         return count
 
@@ -1375,9 +1417,19 @@ class PasswordRuleMiner:
         total = 0
         log.info("Phase 1b: Mining hash files for usernames...")
         for f in files:
+            # Check if interrupt was requested before processing next file
+            if is_interrupt_requested():
+                log.info("Interrupt requested — skipping remaining hashfiles")
+                break
+                
             fpath = Path(f).expanduser().resolve()
             if fpath.is_dir():
                 for subfile in progress(list(fpath.rglob("*")), desc=f"{fpath.name} (dir)", leave=False):
+                    # Check for interrupt before each subfile
+                    if is_interrupt_requested():
+                        log.info("Interrupt requested — skipping remaining files in directory")
+                        break
+                    
                     if subfile.is_file() and subfile.stat().st_size > 0:
                         log.info(f"Reading hashfile: {subfile}")
                         total += self._parse_hashfile(subfile)
@@ -1427,54 +1479,67 @@ class PasswordRuleMiner:
         # Parse file
         count = 0
         usernames_dict = {}
-        with path.open("r", encoding="utf-8", errors="ignore") as f:
-            for line in progress(f, desc=path.stem[:30], leave=False):
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-
-                # If line STARTS with $krb5 → no username → skip
-                if self.KERB_SKIP_RE.match(line):
-                    continue
-
-                username = None
-
-                # Apply extraction patterns
-                for pat in self.COMPILED_USER_RE:
-                    m = pat.match(line)
-                    if m:
-                        # DOMAIN\Alice → real username is group 2
-                        if len(m.groups()) > 1:
-                            username = m.group(2)
-                        else:
-                            username = m.group(1)
+        interrupted = False
+        try:
+            with path.open("r", encoding="utf-8", errors="ignore") as f:
+                for line in progress(f, desc=path.stem[:30], leave=False):
+                    # Check for interrupt request
+                    if is_interrupt_requested():
+                        interrupted = True
+                        log.info(f"  → Interrupt detected while reading {path.name}, saving partial data ({count} usernames so far)")
                         break
+                    
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
 
-                if not username:
-                    continue
+                    # If line STARTS with $krb5 → no username → skip
+                    if self.KERB_SKIP_RE.match(line):
+                        continue
 
-                # Clean email → user@domain.com → user
-                mail = self.EMAIL_RE.match(username)
-                if mail:
-                    username = mail.group(1)
+                    username = None
 
-                username = username.strip().lower()
+                    # Apply extraction patterns
+                    for pat in self.COMPILED_USER_RE:
+                        m = pat.match(line)
+                        if m:
+                            # DOMAIN\Alice → real username is group 2
+                            if len(m.groups()) > 1:
+                                username = m.group(2)
+                            else:
+                                username = m.group(1)
+                            break
 
-                # Reject invalid usernames (SPNs, host$, paths, junk)
-                if (not username
-                    or "/" in username
-                    or "," in username
-                    or username.startswith("$")
-                    or username.endswith("$")):
-                    continue
+                    if not username:
+                        continue
 
-                # Store the username
-                usernames_dict[username] = True
-                self.usernames[username].append("")
-                count += 1
+                    # Clean email → user@domain.com → user
+                    mail = self.EMAIL_RE.match(username)
+                    if mail:
+                        username = mail.group(1)
+
+                    username = username.strip().lower()
+
+                    # Reject invalid usernames (SPNs, host$, paths, junk)
+                    if (not username
+                        or "/" in username
+                        or "," in username
+                        or username.startswith("$")
+                        or username.endswith("$")):
+                        continue
+
+                    # Store the username
+                    usernames_dict[username] = True
+                    self.usernames[username].append("")
+                    count += 1
+        except KeyboardInterrupt:
+            interrupted = True
+            log.info(f"  → Interrupt detected while reading {path.name}, saving partial data ({count} usernames so far)")
         
-        # Store in cache
-        self.cache.set(path, "hashfile", (usernames_dict, count))
+        # Store in cache only if file was fully processed
+        if not interrupted and count > 0:
+            self.cache.set(path, "hashfile", (usernames_dict, count))
+        
         return count
 
     # -------------------------------
