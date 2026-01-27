@@ -78,6 +78,10 @@ options:
   --rules {hashcat,john,both}
                         Output rule format: 'hashcat' (default), 'john' (John the Ripper), or 'both'
 ```
+Example:
+```
+python3 listminer.py -p /mnt/c/PenTesting/data/potfiles/ -hf /mnt/c/PenTesting/data/hashes/ -o /mnt/c/PenTesting/password-cracking/listminer/2026-01/ -v  --rules hashcat --max-workers 12
+```
 
 ### Caching Updates
 
