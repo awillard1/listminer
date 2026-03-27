@@ -24,10 +24,12 @@ v2 improvements:
 import argparse
 import hashlib
 import logging
+import math
 import os
 import pickle
 import re
 import signal
+import subprocess
 import sys
 from collections import Counter, defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -125,8 +127,363 @@ except ImportError:
     ENCHANT_AVAILABLE = False
 
 # =============================================
-# LEVENSHTEIN DISTANCE
+# ASPELL INTEGRATION (OPTIONAL)
 # =============================================
+def _detect_aspell() -> bool:
+    """Return True if the aspell binary is accessible."""
+    try:
+        result = subprocess.run(
+            ["aspell", "--version"],
+            capture_output=True, timeout=5
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return False
+
+ASPELL_AVAILABLE = _detect_aspell()
+
+
+class AspellChecker:
+    """
+    Subprocess-based aspell spell checker.
+
+    Provides the same ``check`` / ``suggest`` interface as pyenchant's Dict so
+    it can be used interchangeably.  Falls back gracefully when aspell is not
+    installed.  Uses batch mode for efficient multi-word checking.
+    """
+
+    def __init__(self, lang: str = "en_US"):
+        self.lang = lang
+        self.available = ASPELL_AVAILABLE
+        self._cache_ok: Set[str] = set()
+        self._cache_bad: Dict[str, List[str]] = {}
+
+    # ------------------------------------------------------------------
+    # Public interface
+    # ------------------------------------------------------------------
+    def check(self, word: str) -> bool:
+        """Return True if *word* is correctly spelled."""
+        if not self.available or not word:
+            return True
+        if word in self._cache_ok:
+            return True
+        if word in self._cache_bad:
+            return False
+        result = self.check_batch([word])
+        return result.get(word, True)
+
+    def suggest(self, word: str) -> List[str]:
+        """Return spelling suggestions for a (possibly misspelled) word."""
+        if not self.available or not word:
+            return []
+        if word in self._cache_bad and self._cache_bad[word]:
+            return self._cache_bad[word]
+        try:
+            result = subprocess.run(
+                ["aspell", "--lang", self.lang, "-a"],
+                input=f"{word}\n",
+                capture_output=True, text=True, timeout=10
+            )
+            suggestions: List[str] = []
+            for line in result.stdout.splitlines():
+                if line.startswith(("& ", "? ")):
+                    parts = line.split(": ", 1)
+                    if len(parts) > 1:
+                        sugs = [s.strip() for s in parts[1].split(", ")]
+                        suggestions.extend(sugs[:5])
+            self._cache_bad[word] = suggestions
+            return suggestions
+        except Exception:
+            return []
+
+    def check_batch(self, words: List[str]) -> Dict[str, bool]:
+        """
+        Efficiently check many words with a single aspell process.
+
+        Returns a mapping of word → is_correct.
+        """
+        if not self.available or not words:
+            return {w: True for w in words}
+
+        results: Dict[str, bool] = {}
+        uncached = [w for w in words if w not in self._cache_ok and w not in self._cache_bad]
+
+        if uncached:
+            try:
+                input_text = "\n".join(uncached) + "\n"
+                proc = subprocess.run(
+                    ["aspell", "--lang", self.lang, "list"],
+                    input=input_text,
+                    capture_output=True, text=True, timeout=30
+                )
+                misspelled = set(proc.stdout.strip().splitlines())
+                for word in uncached:
+                    if word in misspelled:
+                        self._cache_bad.setdefault(word, [])
+                        results[word] = False
+                    else:
+                        self._cache_ok.add(word)
+                        results[word] = True
+            except Exception:
+                for word in uncached:
+                    self._cache_ok.add(word)
+                    results[word] = True
+
+        for w in words:
+            if w not in results:
+                results[w] = w in self._cache_ok
+        return results
+
+
+# =============================================
+# CHARACTER N-GRAM ANALYZER
+# =============================================
+class NgramAnalyzer:
+    """
+    Character-level n-gram language model trained from the password corpus.
+
+    Words with high n-gram log-probability are likely real words; low scores
+    indicate random character sequences (keyboard-walks, gibberish fragments).
+    Used to filter base-word candidates after extraction.
+    """
+
+    def __init__(self, n: int = 3, smoothing: float = 0.1):
+        self.n = n
+        self.smoothing = smoothing
+        self._ngram_counts: Counter = Counter()
+        self._prefix_counts: Counter = Counter()
+        self._alphabet_size = 28  # 26 letters + start/end sentinels
+        self.trained = False
+
+    def train(self, words: Iterable[str]):
+        """Build the model from a collection of (lower-case) words."""
+        for word in words:
+            word = word.lower().strip()
+            if len(word) < 2:
+                continue
+            padded = ("^" * (self.n - 1)) + word + ("$" * (self.n - 1))
+            for i in range(len(padded) - self.n + 1):
+                ngram = padded[i : i + self.n]
+                prefix = ngram[:-1]
+                self._ngram_counts[ngram] += 1
+                self._prefix_counts[prefix] += 1
+        self.trained = bool(self._ngram_counts)
+
+    def score(self, word: str) -> float:
+        """
+        Return the mean log-probability of character n-grams in *word*.
+        Higher (less negative) is more word-like.  Returns 0.0 when untrained.
+        """
+        if not self.trained or not word:
+            return 0.0
+        word = word.lower().strip()
+        padded = ("^" * (self.n - 1)) + word + ("$" * (self.n - 1))
+        total = 0.0
+        count = 0
+        for i in range(len(padded) - self.n + 1):
+            ngram = padded[i : i + self.n]
+            prefix = ngram[:-1]
+            ngram_cnt = self._ngram_counts.get(ngram, 0)
+            prefix_cnt = self._prefix_counts.get(prefix, 0)
+            prob = (ngram_cnt + self.smoothing) / (
+                prefix_cnt + self.smoothing * self._alphabet_size
+            )
+            total += math.log(prob)
+            count += 1
+        return total / count if count > 0 else 0.0
+
+    def is_word_like(self, word: str, threshold: float = -3.5) -> bool:
+        """Return True when the word's n-gram score exceeds *threshold*."""
+        if not self.trained:
+            return True
+        return self.score(word) >= threshold
+
+    def filter_word_like(self, words: List[str], threshold: float = -3.5) -> List[str]:
+        """Keep only those words whose n-gram score exceeds *threshold*."""
+        if not self.trained:
+            return words
+        return [w for w in words if self.is_word_like(w, threshold)]
+
+
+# =============================================
+# PHONETIC INDEX (SOUNDEX)
+# =============================================
+class PhoneticIndex:
+    """
+    Groups base-word candidates by their Soundex phonetic code.
+
+    Phonetic clustering lets the miner recognise that ``password``,
+    ``p@ssword``, and ``passw0rd`` are the same underlying base, and that
+    ``admin``, ``admine``, and ``admyn`` all share a root.  The most-frequent
+    spelling in each cluster is used as the canonical representative.
+    """
+
+    _SDEX_MAP = str.maketrans(
+        "BFPVCGJKQSXZDTLMNR",
+        "111122222222334556"
+    )
+
+    @classmethod
+    def soundex(cls, word: str) -> str:
+        """Return the 4-character Soundex code for *word*."""
+        word = re.sub(r"[^a-zA-Z]", "", word).upper()
+        if not word:
+            return "0000"
+
+        _codes = {
+            'B': '1', 'F': '1', 'P': '1', 'V': '1',
+            'C': '2', 'G': '2', 'J': '2', 'K': '2',
+            'Q': '2', 'S': '2', 'X': '2', 'Z': '2',
+            'D': '3', 'T': '3',
+            'L': '4',
+            'M': '5', 'N': '5',
+            'R': '6',
+        }
+
+        first = word[0]
+        prev_code = _codes.get(first, '0')
+        digits: List[str] = []
+
+        for ch in word[1:]:
+            code = _codes.get(ch, '0')
+            if code and code != '0' and code != prev_code:
+                digits.append(code)
+            if ch not in 'HW':
+                prev_code = code
+
+        return (first + "".join(digits) + "000")[:4]
+
+    def __init__(self):
+        self._index: Dict[str, List[str]] = defaultdict(list)
+
+    def add(self, word: str):
+        """Index a single word."""
+        if not word:
+            return
+        code = self.soundex(word)
+        if word not in self._index[code]:
+            self._index[code].append(word)
+
+    def add_many(self, words: Iterable[str]):
+        """Index multiple words."""
+        for w in words:
+            self.add(w)
+
+    def get_cluster(self, word: str) -> List[str]:
+        """Return all words phonetically similar to *word*."""
+        return list(self._index.get(self.soundex(word), []))
+
+    def clusters(self) -> Dict[str, List[str]]:
+        """Return the full index: Soundex code → list of matching words."""
+        return dict(self._index)
+
+    def canonical_form(self, word: str, frequency_map: Dict[str, int]) -> str:
+        """Return the most-frequent spelling in *word*'s phonetic cluster."""
+        cluster = self.get_cluster(word)
+        return max(cluster, key=lambda w: frequency_map.get(w, 0)) if cluster else word
+
+
+# =============================================
+# WORD BOUNDARY SEGMENTER (ML-BASED)
+# =============================================
+class WordSegmenter:
+    """
+    Dynamic-programming word segmenter for compound password tokens.
+
+    Splits strings like ``helloworld`` → [``hello``, ``world``] using
+    corpus-derived word log-probabilities (no external data files or ML
+    libraries required).  Trained on word frequencies extracted from the
+    password corpus itself.
+
+    Examples
+    --------
+    ``"helloworld"``  → [``"hello"``, ``"world"``]
+    ``"adminpass1"``  → [``"admin"``, ``"pass"``]
+    ``"darknight"``   → [``"dark"``, ``"night"``]
+    """
+
+    MIN_WORD_LEN = 3
+    MAX_WORD_LEN = 15
+
+    def __init__(self):
+        self._word_log_probs: Dict[str, float] = {}
+        self._unknown_log_prob = -20.0
+        self.trained = False
+
+    def train(self, word_freq: Dict[str, int]):
+        """
+        Train on a word → frequency mapping.
+        Converts raw counts to log-probabilities with Laplace smoothing.
+        """
+        total = sum(word_freq.values()) or 1
+        for word, count in word_freq.items():
+            if word:
+                self._word_log_probs[word.lower()] = math.log(count / total)
+        # Set a heavy penalty for unknown words
+        if self._word_log_probs:
+            min_lp = min(self._word_log_probs.values())
+            self._unknown_log_prob = min_lp - 5.0
+        self.trained = bool(self._word_log_probs)
+
+    def _word_score(self, word: str) -> float:
+        return self._word_log_probs.get(word, self._unknown_log_prob)
+
+    def segment(self, text: str) -> List[str]:
+        """
+        Segment *text* into constituent words using Viterbi-style DP.
+
+        Returns the best segmentation as a list of words, or ``[]`` when no
+        meaningful split can be found (e.g. single word, too many unknowns).
+        """
+        if not self.trained or len(text) < self.MIN_WORD_LEN * 2:
+            return []
+
+        text = text.lower()
+        n = len(text)
+
+        # dp[i] = (best_score, path_so_far) for text[:i]
+        dp: Dict[int, Tuple[float, List[str]]] = {0: (0.0, [])}
+
+        for i in range(1, n + 1):
+            best_score = float("-inf")
+            best_path: Optional[List[str]] = None
+            for j in range(max(0, i - self.MAX_WORD_LEN), i):
+                if j not in dp:
+                    continue
+                word = text[j:i]
+                if len(word) < self.MIN_WORD_LEN:
+                    continue
+                candidate = dp[j][0] + self._word_score(word)
+                if candidate > best_score:
+                    best_score = candidate
+                    best_path = dp[j][1] + [word]
+            if best_path is not None:
+                dp[i] = (best_score, best_path)
+
+        if n not in dp:
+            return []
+
+        _, path = dp[n]
+
+        # Reject segmentations with too many unknown words
+        unknown = sum(1 for w in path if w not in self._word_log_probs)
+        if unknown > max(1, len(path) * 0.4):
+            return []
+
+        # Require at least two words for a split to be useful
+        if len(path) < 2:
+            return []
+
+        return [w for w in path if len(w) >= self.MIN_WORD_LEN]
+
+    def get_sub_words(self, text: str) -> List[str]:
+        """
+        Convenience wrapper — returns the words found by :meth:`segment`,
+        or an empty list if no meaningful segmentation was found.
+        """
+        return self.segment(text)
+
+
 def levenshtein_distance(s1: str, s2: str) -> int:
     """
     Calculate the Levenshtein distance between two strings.
@@ -1234,6 +1591,16 @@ class PasswordRuleMiner:
                 log.info("Spell-checking enabled (enchant library available)")
             except Exception as e:
                 log.warning(f"Spell-checker initialization failed: {e}")
+
+        # aspell checker (subprocess-based, complements pyenchant)
+        self.aspell_checker = AspellChecker()
+        if self.aspell_checker.available:
+            log.info("aspell spell-checking enabled (subprocess)")
+
+        # Advanced word extraction components
+        self.ngram_analyzer = NgramAnalyzer(n=3)
+        self.phonetic_index = PhoneticIndex()
+        self.word_segmenter = WordSegmenter()
         
         # Caching
         cache_dir = self.out / ".listminer_cache"
@@ -1334,34 +1701,44 @@ class PasswordRuleMiner:
     
     def generate_spell_checked_suggestions(self, base_words: List[str], limit: int = 1000) -> List[str]:
         """
-        Generate password suggestions using spell-checking library.
-        Returns similar words that might be used as password bases.
+        Generate password suggestions using spell-checking libraries.
+
+        Combines pyenchant and aspell results for broader coverage:
+        - pyenchant (if available) checks and suggests corrections per word.
+        - aspell (if available) performs a fast batch check and returns
+          additional corrections, catching words enchant misses.
+
+        Returns similar English words that are likely to be used as password
+        bases.
         """
-        if not self.spell_checker:
-            return []
-        
-        suggestions = set()
-        
-        for word in base_words[:limit]:
-            if not word or len(word) < 4:
-                continue
-            
-            try:
-                # Check if word is misspelled
-                if not self.spell_checker.check(word):
-                    # Get suggestions
-                    word_suggestions = self.spell_checker.suggest(word)[:3]
-                    for suggestion in word_suggestions:
-                        if 4 <= len(suggestion) <= 15:
-                            suggestions.add(suggestion.lower())
-                
-                # Also add the word itself if it's valid
-                if self.spell_checker.check(word):
+        suggestions: Set[str] = set()
+        candidate_words = [w for w in base_words[:limit] if w and len(w) >= 4]
+
+        # ---- pyenchant ------------------------------------------------
+        if self.spell_checker:
+            for word in candidate_words:
+                try:
+                    if not self.spell_checker.check(word):
+                        for sug in self.spell_checker.suggest(word)[:3]:
+                            if 4 <= len(sug) <= 15:
+                                suggestions.add(sug.lower())
+                    else:
+                        suggestions.add(word.lower())
+                except Exception as e:
+                    if self.verbose:
+                        log.debug(f"Spell-check error for '{word}': {e}")
+
+        # ---- aspell (batch mode, efficient) ---------------------------
+        if self.aspell_checker.available:
+            aspell_results = self.aspell_checker.check_batch(candidate_words)
+            for word, is_correct in aspell_results.items():
+                if is_correct:
                     suggestions.add(word.lower())
-            except Exception as e:
-                if self.verbose:
-                    log.debug(f"Spell-check error for '{word}': {e}")
-        
+                else:
+                    for sug in self.aspell_checker.suggest(word)[:3]:
+                        if 4 <= len(sug) <= 15:
+                            suggestions.add(sug.lower())
+
         return list(suggestions)
     
     def generate_custom_wordlist_rules(self):
@@ -1613,7 +1990,193 @@ class PasswordRuleMiner:
                 context_count += 1
 
         log.info(f"Injected {context_count:,} per-user context rules")
-    
+
+    # =============================================
+    # ADVANCED WORD EXTRACTION METHODS
+    # =============================================
+
+    def _train_word_extraction_models(self):
+        """
+        Train the n-gram analyzer, word segmenter, and phonetic index from the
+        base words that have already been written to ``00_real_bases.txt``.
+
+        Must be called *after* :meth:`generate_real_bases` so the initial
+        extraction has already populated the file.
+        """
+        bases_file = self.out / "00_real_bases.txt"
+        if not bases_file.exists():
+            log.warning("00_real_bases.txt not found; skipping model training")
+            return
+
+        words = [
+            w.strip()
+            for w in bases_file.read_text(encoding="utf-8").splitlines()
+            if w.strip()
+        ]
+        if not words:
+            return
+
+        log.info(f"Training word extraction models on {len(words):,} base words…")
+
+        # 1. N-gram model (character-level language model)
+        self.ngram_analyzer.train(words)
+
+        # 2. Word segmenter — needs word frequencies from both the extracted
+        #    bases and a light pass over the raw password corpus.
+        word_freq: Counter = Counter()
+        for pwd in self.passwords:
+            unleeted = self._unleet_string(pwd).lower()
+            for m in re.finditer(r"[a-z]{3,}", unleeted):
+                w = m.group()
+                if 3 <= len(w) <= 15:
+                    word_freq[w] += 1
+        for w in words:
+            word_freq[w] += 100  # Boost confirmed extracted bases
+
+        self.word_segmenter.train(dict(word_freq))
+
+        # 3. Phonetic index for clustering
+        self.phonetic_index.add_many(words)
+
+        log.info(
+            f"Models trained — n-gram: {len(words):,} words, "
+            f"segmenter: {len(word_freq):,} entries, "
+            f"phonetic index: {len(words):,} entries"
+        )
+
+    def generate_enhanced_bases(self):
+        """
+        Enhanced base-word extraction using compound-word segmentation and
+        n-gram quality filtering.
+
+        For every password in the corpus the segmenter attempts to split it
+        into constituent words (e.g. ``helloworld`` → ``hello`` + ``world``).
+        Candidates are then scored by the n-gram model and only word-like
+        tokens are kept.  Results are written to ``00_enhanced_bases.txt``.
+
+        Must be called after :meth:`_train_word_extraction_models`.
+        """
+        if not self.word_segmenter.trained:
+            log.debug("Word segmenter not trained; skipping enhanced base extraction")
+            return
+
+        log.info("Generating enhanced bases (compound splitting + n-gram filtering)…")
+        log.info(f"Using {self.max_workers} parallel workers")
+
+        def process_batch(batch: List[str]) -> Counter:
+            batch_counter: Counter = Counter()
+            for pwd in batch:
+                unleeted = self._unleet_string(pwd).lower()
+
+                # Attempt segmentation on the raw unleeted form
+                for text in (unleeted, re.sub(r"^[^a-z]+|[^a-z]+$", "", unleeted)):
+                    if not text or len(text) < self.word_segmenter.MIN_WORD_LEN * 2:
+                        continue
+                    for word in self.word_segmenter.get_sub_words(text):
+                        if self.ngram_analyzer.is_word_like(word):
+                            batch_counter[word] += 1
+            return batch_counter
+
+        batch_size = self._calculate_batch_size(len(self.passwords))
+        batches = [
+            self.passwords[i : i + batch_size]
+            for i in range(0, len(self.passwords), batch_size)
+        ]
+
+        enhanced_counter: Counter = Counter()
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            futures = {executor.submit(process_batch, b): i for i, b in enumerate(batches)}
+            for future in as_completed(futures):
+                try:
+                    enhanced_counter.update(future.result())
+                except Exception as e:
+                    log.debug(f"Enhanced extraction batch error: {e}")
+
+        # Adaptive minimum frequency so small potfiles still produce output
+        min_freq = max(2, len(self.passwords) // 10_000)
+        quality = [
+            (w, c)
+            for w, c in enhanced_counter.most_common()
+            if c >= min_freq and 4 <= len(w) <= 15
+        ]
+
+        if quality:
+            out_file = self.out / "00_enhanced_bases.txt"
+            out_file.write_text(
+                "\n".join(w for w, _ in quality) + "\n", encoding="utf-8"
+            )
+            log.info(
+                f" → 00_enhanced_bases.txt ({len(quality):,} bases "
+                f"from compound splitting + n-gram scoring)"
+            )
+        else:
+            log.info("No enhanced bases found above frequency threshold")
+
+    def generate_phonetic_clustered_bases(self):
+        """
+        Produce a phonetically-deduplicated base list.
+
+        Reads all existing base files, indexes every word under its Soundex
+        code, selects the most-frequent spelling from each phonetic cluster
+        as the canonical representative, and writes the result to
+        ``00_phonetic_bases.txt``.
+
+        This collapses variants such as ``password / p@ssword / passw0rd``
+        into a single entry, reducing noise and boosting effective coverage.
+        """
+        log.info("Generating phonetically-clustered bases…")
+
+        source_files = [
+            self.out / "00_real_bases.txt",
+            self.out / "00_analyzed_bases.txt",
+            self.out / "00_enhanced_bases.txt",
+        ]
+
+        all_bases: List[str] = []
+        for bf in source_files:
+            if bf.exists():
+                lines = [
+                    l.strip()
+                    for l in bf.read_text(encoding="utf-8").splitlines()
+                    if l.strip()
+                ]
+                all_bases.extend(lines)
+
+        if not all_bases:
+            log.debug("No bases available for phonetic clustering; skipping")
+            return
+
+        freq_map: Counter = Counter(all_bases)
+
+        index = PhoneticIndex()
+        index.add_many(freq_map.keys())
+
+        def _canonical_key(word: str) -> Tuple[int, int, int]:
+            """
+            Scoring key for selecting the canonical form within a cluster.
+            Priority: frequency → pure alpha (no digits/specials) → shorter length.
+            """
+            return (
+                freq_map.get(word, 0),       # higher frequency wins
+                1 if word.isalpha() else 0,  # prefer alphabetic-only spelling
+                -len(word),                  # prefer shorter (simpler) form
+            )
+
+        canonical_bases: Set[str] = set()
+        for cluster in index.clusters().values():
+            if cluster:
+                best = max(cluster, key=_canonical_key)
+                canonical_bases.add(best)
+
+        out_file = self.out / "00_phonetic_bases.txt"
+        out_file.write_text(
+            "\n".join(sorted(canonical_bases)) + "\n", encoding="utf-8"
+        )
+        log.info(
+            f" → 00_phonetic_bases.txt ({len(canonical_bases):,} "
+            f"phonetically-clustered canonical bases)"
+        )
+
     def generate_unified_base_list(self):
         """
         Combine and deduplicate all base files into a unified list.
@@ -1626,13 +2189,15 @@ class PasswordRuleMiner:
             self.out / "00_analyzed_bases.txt",
             self.out / "00_spell_checked_bases.txt",
             self.out / "00_trie_bases.txt",
+            self.out / "00_enhanced_bases.txt",   # compound-split + n-gram filtered
+            self.out / "00_phonetic_bases.txt",   # phonetically-clustered canonical forms
         ]
         
         unified_bases = set()  # Use a set to automatically deduplicate
 
         for base_file in base_files:
             if not base_file.exists():
-                log.warning(f"Base file not found: {base_file.name}")
+                log.debug(f"Base file not present (skipping): {base_file.name}")
                 continue  # Skip missing files
             
             log.info(f"Reading base file: {base_file.name}")
@@ -2603,8 +3168,13 @@ Top suffixes: {', '.join(k for k, _ in self.suffix.most_common(15))}
         # NEW: Comprehensive password analysis with Levenshtein scoring
         self.analyze_password_transformations()
         
-        # NEW: Spell-checked suggestions (if available)
-        if self.spell_checker and len(self.passwords) > 0:
+        # NEW: Train extraction models on the initial base words, then run
+        #      enhanced extraction (compound splitting + n-gram filtering)
+        self._train_word_extraction_models()
+        self.generate_enhanced_bases()
+
+        # NEW: Spell-checked suggestions (pyenchant + aspell)
+        if (self.spell_checker or self.aspell_checker.available) and self.passwords:
             log.info("Generating spell-checked password suggestions...")
             base_words = [w for w, _ in Counter([re.sub(r'[^a-zA-Z]', '', p.lower()) 
                                                    for p in self.passwords]).most_common(200)]
@@ -2613,8 +3183,11 @@ Top suffixes: {', '.join(k for k, _ in self.suffix.most_common(15))}
                 spell_file = self.out / "00_spell_checked_bases.txt"
                 spell_file.write_text("\n".join(suggestions) + "\n", encoding="utf-8")
                 log.info(f" → 00_spell_checked_bases.txt ({len(suggestions):,} suggestions)")
+
+        # NEW: Phonetic clustering — deduplicates across all base files
+        self.generate_phonetic_clustered_bases()
         
-        # Generate the unified base list
+        # Generate the unified base list (now includes enhanced + phonetic files)
         self.generate_unified_base_list()
 
         # Write outputs
@@ -2630,6 +3203,7 @@ Top suffixes: {', '.join(k for k, _ in self.suffix.most_common(15))}
         
         log.info("Phase 3/3: All artifacts generated successfully!")
         log.info(f"\nALL DONE! → {self.out.resolve()}")
+
 
 # =============================================
 # CLI
